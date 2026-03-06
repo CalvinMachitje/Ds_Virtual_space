@@ -12,12 +12,16 @@ export const apiFetch = async (endpoint: string, options: RequestInit = {}): Pro
     ...options.headers,
   };
 
-  let response = await fetch(`/api${endpoint}`, {
+  // Use the defined base URL (prefer env var)
+  const base = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000"; // ← Changed default to localhost
+
+  let response = await fetch(`${base}${endpoint}`, {  // ← Use full URL (not proxy /api)
     ...options,
     headers,
+    credentials: "include",  // Added: for cookies/sessions if backend uses them
   });
 
-  // Auto-refresh on 401
+  // Auto-refresh on 401 (good logic, but add check for refresh endpoint)
   if (response.status === 401) {
     const refreshToken = localStorage.getItem("refresh_token");
 
@@ -28,12 +32,13 @@ export const apiFetch = async (endpoint: string, options: RequestInit = {}): Pro
       throw new Error("Session expired - no refresh token");
     }
 
-    const refreshRes = await fetch("/api/auth/refresh", {
+    const refreshRes = await fetch(`${base}/api/auth/refresh`, {  // ← Use base here too
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${refreshToken}`,
       },
+      credentials: "include",
     });
 
     if (!refreshRes.ok) {
@@ -48,17 +53,18 @@ export const apiFetch = async (endpoint: string, options: RequestInit = {}): Pro
     // Save new token
     localStorage.setItem("access_token", newAccessToken);
 
-    // CRITICAL FIX: Rebuild headers with fresh token for retry
+    // Rebuild headers with fresh token
     headers = {
       "Content-Type": "application/json",
-      ...getAuthHeader(),  // ← uses new token now
+      ...getAuthHeader(),  // now uses new token
       ...options.headers,
     };
 
-    // Retry with updated headers
-    response = await fetch(`/api${endpoint}`, {
+    // Retry original request
+    response = await fetch(`${base}${endpoint}`, {
       ...options,
       headers,
+      credentials: "include",
     });
   }
 
@@ -84,4 +90,5 @@ export const apiFetch = async (endpoint: string, options: RequestInit = {}): Pro
   return response.json();
 };
 
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://196.253.26.122:5000";
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:5000";
+export const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";

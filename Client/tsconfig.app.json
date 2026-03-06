@@ -1,3 +1,7 @@
+/// <reference types="vite/client" />
+/// <reference types="node" />
+// This file is a TypeScript configuration file for a React application. It specifies the compiler options and the files to include in the compilation process. The configuration is set up to target ES2020, use modern JavaScript features, and support JSX syntax for React. It also includes settings for module resolution and linting rules. The "paths" option allows for aliasing imports from the "src" directory.
+// Client/tsconfig.app.json
 {
   "compilerOptions": {
     "target": "ES2020",
@@ -24,7 +28,9 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
-    }
+    },
+
+    "types": []
   },
   "include": ["src"]
 }

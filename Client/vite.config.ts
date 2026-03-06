@@ -24,16 +24,22 @@ export default defineConfig({
         target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false,
-        // Do NOT remove /api prefix — Flask expects it
-        rewrite: (path) => path,   // ← key fix: keep /api intact
+        // Keep /api prefix — Flask expects it
+        rewrite: (path) => path,
       },
 
-      // Proxy WebSocket (Socket.IO) if you use it
+      // Proxy WebSocket (Socket.IO)
       '/socket.io': {
         target: 'http://localhost:5000',
         ws: true,
         changeOrigin: true,
+        secure: false,
       },
+    },
+
+    // Allow larger payloads for file uploads / Socket.IO
+    hmr: {
+      clientPort: 5173,
     },
   },
 
@@ -52,9 +58,37 @@ export default defineConfig({
     },
   },
 
+  optimizeDeps: {
+    // Critical: Force pre-bundling of Supabase packages
+    include: [
+      '@supabase/supabase-js',
+      '@supabase/auth-js',
+      '@supabase/auth-js/dist/module/GoTrueClient',
+      '@supabase/auth-js/dist/module/GoTrueAdminApi',
+      '@supabase/gotrue-js',
+      '@supabase/postgrest-js',
+      '@supabase/realtime-js',
+      '@supabase/storage-js',
+    ],
+    esbuildOptions: {
+      // Modern target + browser platform fixes ESM resolution issues
+      target: 'es2020',
+      platform: 'browser',
+      // Reduce noise from esbuild
+      logLevel: 'silent',
+    },
+  },
+
   build: {
     outDir: 'dist',
     sourcemap: true,
+    target: 'es2020',  // Modern browsers
+    minify: 'esbuild',
+    commonjsOptions: {
+      // Ignore dynamic requires in Supabase (prevents build errors)
+      ignoreDynamicRequires: true,
+      transformMixedEsModules: true,
+    },
     rollupOptions: {
       output: {
         manualChunks: {
@@ -79,10 +113,29 @@ export default defineConfig({
     },
   },
 
-  // Suppress some noisy warnings
+  // Suppress noisy esbuild warnings
   esbuild: {
     logOverride: {
       'this-is-undefined-in-esm': 'silent',
+      'tsconfig-json-not-found': 'silent',
+    },
+  },
+
+  // For vite preview (production-like testing)
+  preview: {
+    port: 4173,
+    host: true,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:5000',
+        changeOrigin: true,
+        secure: false,
+      },
+      '/socket.io': {
+        target: 'http://localhost:5000',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 })

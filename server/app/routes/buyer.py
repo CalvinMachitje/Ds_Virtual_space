@@ -2,9 +2,6 @@
 from functools import wraps
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import get_jwt, jwt_required, get_jwt_identity
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-import postgrest
 from app.services.supabase_service import supabase
 from datetime import datetime, timedelta
 from werkzeug.utils import secure_filename
@@ -12,7 +9,8 @@ import uuid, os , time, logging
 from app.utils.audit import log_action
 from app import socketio
 from postgrest import exceptions as postgrest_exceptions
-from app.extensions import safe_redis_call, limiter
+from app.extensions import limiter
+from app.socket_handlers import notify_request_update
 
 bp = Blueprint("buyer", __name__, url_prefix="/api/buyer")
 
@@ -24,7 +22,6 @@ MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5MB
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
 
 # ────────────────────────────────────────────────
 # GET /api/buyer/dashboard
@@ -227,7 +224,6 @@ def cancel_booking(id):
     except Exception as e:
         current_app.logger.error(f"Cancel booking error: {str(e)}")
         return jsonify({"error": "Failed to cancel booking"}), 500
-
 
 # ────────────────────────────────────────────────
 # GET /api/buyer/profile/:id/bookings
@@ -968,8 +964,26 @@ def unsave_seller(seller_id):
 
 
 # ────────────────────────────────────────────────
-# Buyer Requests – Create new job request
+# Buyer Requests
 # ────────────────────────────────────────────────
+@bp.route("/requests", methods=["GET"])
+@jwt_required()
+def get_buyer_requests():
+    user_id = get_jwt_identity()
+
+    try:
+        res = supabase.table("job_requests")\
+            .select("*")\
+            .eq("buyer_id", user_id)\
+            .order("created_at", desc=True)\
+            .execute()
+
+        return jsonify(res.data), 200
+    except Exception as e:
+        logger.error(f"Failed to fetch buyer requests: {str(e)}")
+        return jsonify({"error": "Failed to load requests"}), 500
+
+
 @bp.route("/requests", methods=["POST"])
 @jwt_required()
 def create_buyer_request():
@@ -1005,7 +1019,7 @@ def create_buyer_request():
             "preferred_start_time": data.get("preferred_start_time") or None,
             "estimated_due_time": data.get("estimated_due_time") or None,
             "seller_id": data.get("seller_id") or None,
-            "status": "pending",  # FIXED: must match CHECK constraint ('pending', 'assigned', etc.)
+            "status": "pending_admin",  # Changed to match your CHECK constraint
             "created_at": "now()"
         }
 
@@ -1035,6 +1049,15 @@ def create_buyer_request():
                 "seller_id": req.get("seller_id"),
                 "budget": req.get("budget")
             }
+        )
+
+        # ── REAL-TIME NOTIFICATION: New request created ──────────────────────
+        notify_request_update(
+            request_id=request_id,
+            buyer_id=user_id,
+            status="pending_admin",
+            message="Your job request has been submitted and is pending admin review",
+            extra={"title": req["title"]}
         )
 
         logger.info(f"Job request created successfully | id={request_id} | buyer={user_id}")
@@ -1090,6 +1113,66 @@ def create_buyer_request():
             "error": "Internal server error",
             "message": "Something went wrong - please try again later"
         }), 500
+
+
+@bp.route("/requests/<request_id>/cancel", methods=["PATCH"])
+@jwt_required()
+def cancel_buyer_request(request_id):
+    """
+    Allow buyer to cancel their own pending request.
+    """
+    user_id = get_jwt_identity()
+
+    try:
+        # Fetch request to verify ownership and status
+        req_res = supabase.table("job_requests")\
+            .select("buyer_id, status")\
+            .eq("id", request_id)\
+            .maybe_single()\
+            .execute()
+
+        if not req_res.data:
+            return jsonify({"error": "Request not found"}), 404
+
+        request_data = req_res.data
+
+        if request_data["buyer_id"] != user_id:
+            return jsonify({"error": "You do not own this request"}), 403
+
+        if request_data["status"] not in ("pending_admin", "pending"):
+            return jsonify({"error": "Cannot cancel request in current status"}), 400
+
+        # Update status
+        update_res = supabase.table("job_requests")\
+            .update({
+                "status": "cancelled",
+                "updated_at": "now()"
+            })\
+            .eq("id", request_id)\
+            .execute()
+
+        if not update_res.data:
+            return jsonify({"error": "Failed to cancel request"}), 500
+
+        # ── REAL-TIME NOTIFICATION: Request cancelled ───────────────────────
+        notify_request_update(
+            request_id=request_id,
+            buyer_id=user_id,
+            status="cancelled",
+            message="Your job request has been cancelled"
+        )
+
+        log_action(
+            actor_id=user_id,
+            action="cancel_job_request",
+            details={"request_id": request_id}
+        )
+
+        return jsonify({"message": "Request cancelled successfully"}), 200
+
+    except Exception as e:
+        logger.exception(f"Error cancelling request {request_id} by user {user_id}")
+        return jsonify({"error": "Failed to cancel request"}), 500
 
 # ────────────────────────────────────────────────
 # ADDED: GET /api/buyer/gigs/<id>

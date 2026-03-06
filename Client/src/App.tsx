@@ -65,7 +65,7 @@ import AdminLogin from "./pages/admin/AdminLogin";
 // Auth & Layout
 import { useAuth } from "@/context/AuthContext";
 import BottomNav from "@/components/layout/NavLayout";
-import OAuthCallback from "./pages/Auth/OAuthCallback";
+import OAuthCallback from "./pages/Auth/OAuthCallBack";
 
 const queryClient = new QueryClient();
 

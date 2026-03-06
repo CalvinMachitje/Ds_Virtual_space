@@ -6,11 +6,10 @@ import socketio
 from app.services.supabase_service import supabase
 from app.utils.decorators import admin_required
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple
-import uuid, time, logging
-from app.extensions import safe_redis_call, limiter
-from flask_limiter.util import get_remote_address
-
+from typing import Dict, Any
+import uuid, logging
+from app.extensions import limiter
+from app.utils.utils import broadcast_log
 
 bp = Blueprint("admin", __name__, url_prefix="/api/admin")
 
@@ -1964,3 +1963,15 @@ def list_audit_logs():
     except Exception as e:
         logger.exception("Failed to list audit logs")
         return jsonify({"logs": [], "total": 0, "error": "Failed to load logs"}), 200
+    
+@bp.route("/log", methods=["POST"])
+def create_log():
+    data = request.json
+    log = {
+        "id": str(uuid.uuid4()),
+        "user_id": data.get("user_id", "unknown"),
+        "action": data.get("action", "unknown"),
+        "details": data.get("details", {}),
+    }
+    broadcast_log(log)
+    return jsonify({"status": "ok", "log_id": log["id"]})

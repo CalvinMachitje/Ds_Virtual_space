@@ -2,20 +2,16 @@
 from functools import wraps
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
-from postgrest import APIError
 import postgrest
 import socketio
 from app.services.supabase_service import supabase
 from datetime import datetime
 from werkzeug.utils import secure_filename
 import uuid
-import os
 import logging
-from app.utils.audit import log_action  # your audit helper
+from app.utils.audit import log_action
 import time
-from app.extensions import limiter  # Redis-backed rate limiter instance
+from app.extensions import limiter
 
 bp = Blueprint("seller", __name__, url_prefix="/api/seller")
 

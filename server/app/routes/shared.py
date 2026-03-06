@@ -1,12 +1,9 @@
 # app/routes/shared.py
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import get_jwt, jwt_required, get_jwt_identity
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from app.services.supabase_service import supabase
-from datetime import datetime, timedelta
-import re, uuid, logging, time
-from app.extensions import socketio
+from datetime import datetime
+import re, logging
 from app.utils.audit import log_action
 from app.config import ALLOWED_REDIRECT_DOMAINS 
 from app.extensions import safe_redis_call, limiter

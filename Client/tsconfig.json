@@ -1,3 +1,6 @@
+// This is the base tsconfig.json which is used by both tsconfig.app.json and tsconfig.node.json
+// It contains the common compiler options and path mappings for the project.
+// Client/tsconfig.app.json and Client/tsconfig.node.json will extend this base configuration and add their own specific options.
 {
   "files": [],
   "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tsconfig.node.json" }],

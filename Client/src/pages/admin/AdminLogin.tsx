@@ -103,7 +103,7 @@ export default function AdminLogin() {
                 id="password"
                 type="password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => setPassword(e.target.value.trim())}  // Added trim for safety
                 required
                 disabled={loading}
                 className="bg-slate-800 border-slate-700 text-white placeholder:text-slate-500"
