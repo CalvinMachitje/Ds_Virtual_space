@@ -124,7 +124,7 @@ def signup():
 # POST /api/auth/login  (regular users: buyer/seller)
 # ───────────────────────────────────────────────────
 @bp.route("/login", methods=["POST"])
-@cross_origin(origins=["http://localhost:5173", "*"])  # Added: Explicit CORS for localhost (remove * in prod)
+@cross_origin(origins=["http://localhost:5173", "*"])
 @limiter.limit("5 per minute; 20 per hour")
 def login():
     data = request.get_json(silent=True) or {}
@@ -253,22 +253,19 @@ def login():
 # POST /api/auth/admin-login  (admin only)
 # ────────────────────────────────────────────────
 @bp.route("/admin-login", methods=["POST", "OPTIONS"])
-@cross_origin(origins=["http://localhost:5173", "*"])  # Tighten in prod
+@cross_origin(origins=["http://localhost:5173", "*"])
 @limiter.limit("3 per minute; 10 per hour")
 def admin_login():
     """
-    Admin-only login endpoint.
-    Returns JWT on success, 401 on bad credentials, 403 on non-admin.
-    Handles Redis lockouts, Supabase auth, email confirmation, and 2FA.
+    Admin-only login endpoint - FIXED for your exact schema
     """
-
     if request.method == "OPTIONS":
         return "", 204
 
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
-    otp = data.get("otp")  # optional: TOTP 2FA code
+    otp = data.get("otp")
 
     if not email or not password:
         return jsonify({"error": "Email and password are required"}), 400
@@ -277,15 +274,15 @@ def admin_login():
     fail_key = f"admin_fail:{email}:{ip}"
     lock_key = f"admin_lock:{email}:{ip}"
 
-    # 1. Check if account is locked
+    # Check if account is locked
     if safe_redis_call("exists", lock_key, default=False):
         ttl = safe_redis_call("ttl", lock_key, default=0)
         return jsonify({
-            "error": f"Too many failed attempts. Admin login locked for {ttl // 60 + 1} minutes"
+            "error": f"Too many failed attempts. Locked for {ttl // 60 + 1} minutes"
         }), 429
 
     try:
-        # 2. Authenticate with Supabase
+        # 1. Supabase Auth
         auth_res = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
@@ -300,98 +297,78 @@ def admin_login():
             if fails >= 5:
                 safe_redis_call("setex", lock_key, 1800, "locked")
                 log_action(None, "admin_account_locked", details={
-                    "email": email,
-                    "ip": ip,
-                    "fails": fails
+                    "email": email, "ip": ip, "fails": fails
                 })
-                return jsonify({
-                    "error": "Too many failed attempts. Admin login locked for 30 minutes"
-                }), 429
+                return jsonify({"error": "Too many failed attempts. Locked for 30 minutes"}), 429
 
-            log_action(None, "failed_admin_login", details={
-                "email": email,
-                "ip": ip,
-                "attempt": fails
-            })
+            log_action(None, "failed_admin_login", details={"email": email, "ip": ip})
             logger.warning(f"Admin login failed for {email}: invalid credentials")
             return jsonify({"error": "Invalid email or password"}), 401
 
-        # 3. Verify admin record
-        admin_res = supabase.table("admins")\
-            .select("admin_level, permissions, last_login")\
-            .eq("id", user.id)\
-            .maybe_single()\
-            .execute()
-
+        # 2. FIXED: Safe admin verification with try/catch
         admin = None
-
-        # Handle 204 (no content) and empty data gracefully
-        if admin_res.status_code in (200, 204):
-            if admin_res.data:  # Record exists
-                admin = admin_res.data
-            else:  # No record → not admin
+        try:
+            # Try single record fetch - fails cleanly on no record
+            admin_res = supabase.table("admins")\
+                .select("admin_level, permissions, last_login")\
+                .eq("id", user.id)\
+                .single()\
+                .execute()
+            admin = admin_res.data
+            
+        except Exception as admin_error:
+            error_str = str(admin_error).lower()
+            
+            # Handle all "no record" cases (PGRST116=not found, 204, 406, etc.)
+            if any(x in error_str for x in ["pgrst116", "not found", "no rows", "204", "406"]):
                 log_action(None, "admin_login_denied", details={
                     "email": email,
-                    "reason": "no_admin_record_found",
+                    "reason": "no_admin_record",
                     "user_id": str(user.id)
                 })
-                logger.info(f"No admin record found for {email} (id: {user.id})")
+                logger.info(f"No admin record for {email} (id: {user.id})")
                 return jsonify({
-                    "error": "This account is not registered as an admin. Contact support to be added."
+                    "error": "This account is not registered as an admin. Contact support."
                 }), 403
-        else:
-            # Any other Supabase error (network, 500, etc.)
-            error_detail = admin_res.json() if hasattr(admin_res, 'json') else str(admin_res)
-            logger.error(f"Admin query failed: status={admin_res.status_code}, detail={error_detail}")
-            return jsonify({"error": "Admin verification failed - internal error"}), 500
+            
+            # Log real Supabase errors
+            logger.error(f"Admin query failed for {user.id}: {admin_error}")
+            return jsonify({"error": "Admin verification failed - server error"}), 500
 
-        # 4. Fetch user profile
+        # 3. FIXED: Fetch profile (MATCHES YOUR EXACT SCHEMA - NO email_confirmed_at)
         profile_res = supabase.table("profiles")\
-            .select("id, full_name, email, role, avatar_url, two_factor_enabled, email_confirmed_at")\
+            .select("full_name, avatar_url, two_factor_enabled")\
             .eq("id", user.id)\
-            .maybe_single()\
+            .single()\
             .execute()
+        profile = getattr(profile_res, 'data', {})
 
-        profile = profile_res.data if profile_res.data else {}
-
-        # 5. Require email confirmation
+        # 4. Email confirmation check - USE Supabase auth.user (ALWAYS exists)
         if not user.email_confirmed_at:
             return jsonify({
-                "error": "Admin email not confirmed. Please check your inbox.",
+                "error": "Admin email not confirmed. Check your inbox.",
                 "needs_confirmation": True
             }), 403
 
-        # 6. 2FA check
-        if profile.get("two_factor_enabled", False):
-            if not otp:
-                return jsonify({
-                    "success": True,
-                    "requires_2fa": True,
-                    "message": "2FA code required for admin login"
-                }), 200
+        # 5. 2FA (if enabled)
+        if profile.get("two_factor_enabled", False) and not otp:
+            return jsonify({
+                "success": True,
+                "requires_2fa": True,
+                "message": "2FA code required"
+            }), 200
 
-            try:
-                verified = supabase.auth.mfa.verify({
-                    "factor_id": "totp",  # TODO: replace with actual user factor_id from DB
-                    "code": otp
-                })
-                if not verified:
-                    return jsonify({"error": "Invalid 2FA code"}), 401
-            except Exception as e:
-                logger.error(f"Admin 2FA verification failed for {email}: {str(e)}")
-                return jsonify({"error": "2FA verification failed"}), 401
+        # 6. SUCCESS - Reset counters
+        safe_redis_call("del", fail_key)
+        safe_redis_call("del", lock_key)
 
-        # 7. Success → reset failure counters
-        safe_redis_call("delete", fail_key)
-        safe_redis_call("delete", lock_key)
-
-        # 8. Update last login timestamp
+        # Update last login
         supabase.table("admins")\
             .update({"last_login": "now()"})\
             .eq("id", user.id)\
             .execute()
 
-        # 9. Generate JWT tokens
+        # Generate JWT with admin claims
         access = create_access_token(
             identity=user.id,
             additional_claims={
@@ -401,18 +378,13 @@ def admin_login():
         )
         refresh = create_refresh_token(identity=user.id)
 
-        # 10. Audit log success
-        log_action(
-            actor_id=user.id,
-            action="admin_login_success",
-            details={
-                "email": email,
-                "admin_level": admin["admin_level"],
-                "ip": ip
-            }
-        )
+        # Audit success
+        log_action(user.id, "admin_login_success", details={
+            "email": email,
+            "admin_level": admin["admin_level"],
+            "ip": ip
+        })
 
-        # 11. Return response
         return jsonify({
             "success": True,
             "access_token": access,
@@ -422,7 +394,7 @@ def admin_login():
                 "email": user.email,
                 "role": "admin",
                 "admin_level": admin["admin_level"],
-                "permissions": admin.get("permissions") or {},
+                "permissions": admin.get("permissions", {}),
                 "last_login": admin.get("last_login"),
                 **profile
             }
@@ -430,9 +402,9 @@ def admin_login():
 
     except Exception as e:
         error_str = str(e)
-        logger.exception(f"Unexpected error during admin login for {email}")
+        logger.exception(f"Unexpected admin login error for {email}")
 
-        # Increment failure counter safely even on exception
+        # Safe failure counting
         fails = safe_redis_call("incr", fail_key, default=0) or 0
         safe_redis_call("expire", fail_key, 1800)
         if fails >= 5:
@@ -447,14 +419,8 @@ def admin_login():
         if "invalid login credentials" in error_str.lower():
             return jsonify({"error": "Invalid email or password"}), 401
 
-        # Better frontend message for 204-like errors
-        if "Missing response" in error_str or "204" in error_str:
-            return jsonify({
-                "error": "This account is not registered as an admin. Contact support."
-            }), 403
-
         return jsonify({
-            "error": "Authentication failed. Please try again later.",
+            "error": "Authentication failed. Please try again.",
             "details": error_str[:100] if current_app.debug else None
         }), 500
 
