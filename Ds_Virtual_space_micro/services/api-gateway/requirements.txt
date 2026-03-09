@@ -1,0 +1,11 @@
+# Ds_Virtual_space_micro/services/auth-service/app/services/auth-service/requirements.txt
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-JWT-Extended==4.5.3
+Flask-SocketIO==5.3.6
+supabase==2.0.0
+redis==5.0.1
+python-dotenv==1.0.0
+gunicorn==22.0.0
+eventlet==0.33.3
+requests==2.31.0

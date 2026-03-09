@@ -1,3 +1,4 @@
+# server/app/__init__.py
 import os
 import uuid
 import logging
