@@ -1,4 +1,4 @@
-# app/services/supabase_service.py
+# services/auth-service/app/services/supabase_service.py
 """
 Central Supabase client for backend (uses service_role key → full access).
 Never use this file in frontend code.

@@ -1,4 +1,4 @@
-# server/app/utils/audit.py
+# services/auth-service/app/utils/audit.py
 """
 Audit logging helper - logs actions to console + Redis list.
 """

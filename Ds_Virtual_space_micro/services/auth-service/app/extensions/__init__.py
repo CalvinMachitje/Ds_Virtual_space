@@ -1,165 +1,242 @@
-# server/app/__init__.py
-import os
-import uuid
+# services/auth-service/app/extensions/__init__.py
+"""
+Centralized Flask extensions for auth-service microservice.
+All extensions are created here and initialized via init_extensions().
+"""
+
+import json
+import time
 import logging
-from datetime import datetime, timedelta
-from flask import Flask, jsonify, request, g
-from flask_jwt_extended import get_jwt, verify_jwt_in_request
-from werkzeug.exceptions import HTTPException
-from dotenv import load_dotenv
+import threading
+import os
+import redis
+from typing import Optional, Any
 
-from app.extensions import (
-    socketio,
-    jwt,
-    limiter,
-    cors,
-    migrate,
-    mail,
-    cache,
-    compress,
-    talisman,
-    init_extensions,
-    setup_logging,
-    redis_client,
-)
+from flask import Flask, current_app
+from flask_socketio import SocketIO
+from flask_jwt_extended import JWTManager
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_migrate import Migrate
+from flask_cors import CORS
+from flask_mail import Mail
+from flask_caching import Cache
+from flask_compress import Compress
+from flask_talisman import Talisman
+from datetime import datetime, timezone
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-def create_app() -> Flask:
-    app = Flask(__name__)
+# ────────────────────────────────────────────────
+# Core Extensions (created uninitialized)
+# ────────────────────────────────────────────────
 
-    # ────────────────────────────────
-    # 🔐 Configuration – Load from .env with sane defaults
-    # ────────────────────────────────
-    jwt_secret = os.getenv("JWT_SECRET_KEY")
-    if not jwt_secret or jwt_secret.strip() == "":
-        raise RuntimeError("JWT_SECRET_KEY is missing or empty in .env file")
+socketio = SocketIO(
+    cors_allowed_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://196.253.26.113:5173",
+        "http://196.253.26.113",
+        "*"  # temporary – tighten in production
+    ],
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25,
+    async_mode="eventlet",
+    cors_credentials=True,
+    cors_methods=["GET", "POST", "OPTIONS"],
+    cors_headers=["Content-Type", "Authorization", "X-Requested-With"]
+)
 
-    redis_url = os.getenv("REDIS_URL")
-    if not redis_url:
-        raise RuntimeError("REDIS_URL must be set in .env")
+jwt = JWTManager()
 
-    # Read expiry from .env, fallback to reasonable values
-    access_expires_min = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRES_MINUTES", "10080"))  # 7 days default
-    refresh_expires_days = int(os.getenv("JWT_REFRESH_TOKEN_EXPIRES_DAYS", "30"))
+limiter = Limiter(
+    key_func=get_remote_address,
+    storage_uri=os.getenv("REDIS_URL") or "redis://localhost:6379/0"
+)
 
-    app.config.update(
-        SECRET_KEY=os.getenv("SECRET_KEY") or os.urandom(32).hex(),
-        JWT_SECRET_KEY=jwt_secret,
-        JWT_ACCESS_TOKEN_EXPIRES=timedelta(minutes=access_expires_min),
-        JWT_REFRESH_TOKEN_EXPIRES=timedelta(days=refresh_expires_days),
-        JWT_TOKEN_LOCATION=["headers"],
-        JWT_COOKIE_SECURE=not app.debug,  # Secure in prod, False in dev
-        JWT_COOKIE_SAMESITE="Strict",
-        JWT_COOKIE_CSRF_PROTECT=True,
-        JWT_VERIFY_EXPIRATION=True,  # ← Force expiry validation during decode
-        REDIS_URL=redis_url,
-        SESSION_COOKIE_SECURE=not app.debug,
-        SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SAMESITE="Strict",
-        PERMANENT_SESSION_LIFETIME=timedelta(hours=1),
-        PROPAGATE_EXCEPTIONS=False,
+cors = CORS()
+migrate = Migrate()
+mail = Mail()
+
+cache = Cache(config={
+    "CACHE_TYPE": "redis",
+    "CACHE_DEFAULT_TIMEOUT": 300,
+})
+
+compress = Compress()
+talisman = Talisman()
+
+# ────────────────────────────────────────────────
+# Redis client
+# ────────────────────────────────────────────────
+
+redis_client: Optional[redis.Redis] = None
+
+
+def init_redis(app: Flask) -> None:
+    """Initialize Redis with retries, detailed logging, and old Redis compatibility."""
+    global redis_client
+
+    if redis_client is not None:
+        logger.debug("Redis already initialized - skipping")
+        return
+
+    redis_url = (
+        app.config.get("REDIS_URL")
+        or os.getenv("REDIS_URL")
+        or "redis://localhost:6379/0"
     )
 
-    # ────────────────────────────────
-    # 📜 Logging
-    # ────────────────────────────────
-    setup_logging(app)
+    logger.debug(f"Starting Redis init with URL: {redis_url}")
 
-    # ────────────────────────────────
-    # 🌍 Frontend origins
-    # ────────────────────────────────
-    frontend_origins = os.getenv(
-        "FRONTEND_ORIGINS",
-        "http://localhost:5173,http://196.253.26.122:5173"
-    ).split(",")
-    app.config["FRONTEND_ORIGINS"] = [o.strip() for o in frontend_origins if o.strip()]
+    max_retries = 5
+    retry_delay = 2
 
-    # ────────────────────────────────
-    # 🧠 Initialize extensions
-    # ────────────────────────────────
-    init_extensions(app)
+    for attempt in range(1, max_retries + 1):
+        logger.debug(f"Attempt {attempt}/{max_retries}")
+        try:
+            logger.debug("Creating client...")
+            redis_client = redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                retry_on_timeout=True,
+                max_connections=20
+            )
+            logger.debug(f"Client created: {redis_client!r}")
 
-    # ────────────────────────────────
-    # 🔒 JWT Blocklist (using Redis)
-    # ────────────────────────────────
-    @jwt.token_in_blocklist_loader
-    def check_if_token_revoked(jwt_header, jwt_payload):
-        jti = jwt_payload.get("jti")
-        if not redis_client:
-            return False
-        return redis_client.get(f"blacklist:{jti}") == "true"
+            logger.debug("Sending PING...")
+            pong = redis_client.ping()
+            logger.debug(f"PING raw result: {pong!r} (type: {type(pong)})")
 
-    # ────────────────────────────────
-    # 📦 Register Blueprints
-    # ────────────────────────────────
-    from app.routes.auth import bp as auth_bp
-    from app.routes.admin import bp as admin_bp
-    from app.routes.buyer import bp as buyer_bp
-    from app.routes.seller import bp as seller_bp
-    from app.routes.shared import bp as shared_bp
-    from app.routes.support import bp as support_bp
+            if pong is True or pong in (b"PONG", "PONG"):
+                logger.info(f"Redis connected successfully: {redis_url}")
+                logger.debug(f"Server info: {redis_client.info('server')}")
+                return
+            else:
+                logger.warning(f"Unexpected PING result: {pong}")
 
-    app.register_blueprint(auth_bp)
-    app.register_blueprint(admin_bp)
-    app.register_blueprint(buyer_bp)
-    app.register_blueprint(seller_bp)
-    app.register_blueprint(shared_bp)
-    app.register_blueprint(support_bp)
+        except redis.ConnectionError as e:
+            logger.warning(f"ConnectionError on attempt {attempt}: {str(e)}")
+        except redis.TimeoutError as e:
+            logger.warning(f"TimeoutError on attempt {attempt}: {str(e)}")
+        except redis.RedisError as e:
+            logger.warning(f"RedisError on attempt {attempt}: {str(e)}")
+        except Exception as e:
+            logger.exception(f"Unexpected error on attempt {attempt}: {str(e)}")
 
-    # ────────────────────────────────
-    # 🆔 Request ID Middleware + CORS
-    # ────────────────────────────────
-    @app.before_request
-    def handle_options():
-        if request.method == "OPTIONS":
-            response = app.make_response(('', 204))
-            origin = request.headers.get("Origin")
-            allowed = app.config["FRONTEND_ORIGINS"]
-            if origin in allowed or "*" in allowed:
-                response.headers["Access-Control-Allow-Origin"] = origin or "*"
-                response.headers["Access-Control-Allow-Credentials"] = "true"
-                response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-                response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept"
-                response.headers["Access-Control-Max-Age"] = "86400"
-            return response
+        if attempt < max_retries:
+            logger.debug(f"Retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
 
-    @app.after_request
-    def add_cors_headers(response):
-        origin = request.headers.get("Origin")
-        allowed = app.config["FRONTEND_ORIGINS"]
-        if origin in allowed or "*" in allowed:
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Allow-Credentials"] = "true"
-        return response
+    logger.critical(f"Redis connection FAILED after {max_retries} attempts")
+    redis_client = None
 
-    # ────────────────────────────────
-    # ❤️ Health Check
-    # ────────────────────────────────
-    @app.route("/api/health")
-    def health():
-        redis_status = "ok" if redis_client and redis_client.ping() else "failed"
-        return jsonify({
-            "status": "ok" if redis_status == "ok" else "degraded",
-            "redis": redis_status,
-            "timestamp": datetime.utcnow().isoformat(),
-        })
 
-    # ────────────────────────────────
-    # 🛑 Global Error Handler
-    # ────────────────────────────────
-    @app.errorhandler(Exception)
-    def handle_exception(e):
-        if isinstance(e, HTTPException):
-            return jsonify({"error": e.description}), e.code
-        logger.exception(f"[{getattr(g, 'request_id', 'unknown')}] Unhandled exception")
-        return jsonify({"error": "Internal server error"}), 500
+def safe_redis_call(method_name: str, *args, default: Any = None) -> Any:
+    """Safely call a Redis method. Returns default on failure."""
+    if redis_client is None:
+        logger.warning(f"Redis unavailable - skipping {method_name}")
+        return default
 
-    # ────────────────────────────────
-    # ⚡ Socket.IO JWT Auth (moved to socket_handlers.py)
-    # ────────────────────────────────
-    # Note: The socket_connect, subscribe_logs, unsubscribe_logs handlers
-    # should be in socket_handlers.py – remove them from here if duplicated
+    try:
+        method = getattr(redis_client, method_name)
+        result = method(*args)
+        logger.debug(f"Redis {method_name} succeeded")
+        return result
+    except Exception as e:
+        logger.error(f"Redis {method_name} failed: {str(e)}")
+        return default
 
-    return app
+
+def init_extensions(app: Flask) -> None:
+    """Initialize extensions in correct order."""
+    init_redis(app)
+
+    if redis_client:
+        socketio.message_queue = "redis://"
+        logger.info("Socket.IO message queue set to Redis")
+    else:
+        logger.warning("Redis unavailable – Socket.IO pub/sub disabled")
+        socketio.message_queue = None
+
+    socketio.init_app(app)
+
+    cors.init_app(
+        app,
+        resources={
+            r"/api/*": {"origins": "*"},
+            r"/socket.io/*": {"origins": "*"}
+        },
+        supports_credentials=True
+    )
+
+    jwt.init_app(app)
+    limiter.init_app(app)
+    mail.init_app(app)
+    cache.init_app(app)
+    compress.init_app(app)
+    talisman.init_app(app, force_https=not app.debug)
+
+    logger.info("All extensions initialized successfully")
+
+
+def setup_logging(app: Flask) -> None:
+    log_level = logging.DEBUG if app.debug else logging.INFO
+
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[logging.StreamHandler()],
+    )
+
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+    logging.getLogger("socketio").setLevel(logging.WARNING)
+    logging.getLogger("engineio").setLevel(logging.WARNING)
+
+    logger.info(f"Logging configured at level: {logging.getLevelName(log_level)}")
+
+
+REDIS_LOG_CHANNEL = "live_logs_channel"
+
+
+def start_redis_log_listener(app: Flask):
+    """Background thread: Redis pub/sub → Socket.IO broadcast."""
+    if not redis_client:
+        logger.warning("No Redis client – live logs pub/sub disabled")
+        return
+
+    def listener():
+        while True:
+            try:
+                pubsub = redis_client.pubsub()
+                pubsub.subscribe(REDIS_LOG_CHANNEL)
+                logger.info(f"Subscribed to {REDIS_LOG_CHANNEL}")
+
+                for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+
+                    try:
+                        log_data = json.loads(message["data"])
+                        socketio.emit("new_log", log_data, namespace="/")
+                        logger.debug("Broadcasted live log")
+                    except json.JSONDecodeError:
+                        logger.error("Invalid JSON in log message")
+                    except Exception as e:
+                        logger.error(f"Emit failed: {str(e)}")
+
+            except redis.ConnectionError as e:
+                logger.error(f"Redis pub/sub lost: {str(e)}")
+            except Exception as e:
+                logger.error(f"Pub/sub crashed: {str(e)}")
+
+            logger.info("Reconnecting pub/sub in 5s...")
+            time.sleep(5)
+
+    thread = threading.Thread(target=listener, daemon=True, name="RedisLogListener")
+    thread.start()
+    logger.info("Started Redis live logs listener")
