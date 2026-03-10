@@ -1,44 +1,61 @@
-# services/auth_service/app/routes/auth.py
-from flask import Blueprint, current_app, request, jsonify
+# services/auth-service/app/routes/auth.py
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import (
     create_access_token,
     create_refresh_token,
+    decode_token,
     jwt_required,
     get_jwt_identity,
-    get_jwt
+    get_jwt,
+    JWTManager
 )
-from supabase_service import supabase
-from datetime import datetime, timedelta
-import re, logging, time
-from utils.audit import log_action
-from extensions import safe_redis_call, limiter   
 from flask_cors import cross_origin
+from datetime import datetime, timedelta
+import re
+import logging
+import time
 
+import jwt
+
+from app.services.supabase_service import supabase
+from app.utils.audit import log_action
+from app.extensions import safe_redis_call, limiter
 
 bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 logger = logging.getLogger(__name__)
 
+# ────────────────────────────────────────────────
+# Security Configuration (can be moved to config later)
+# ────────────────────────────────────────────────
+RATE_LIMIT_LOGIN = "5 per minute; 20 per hour"
+RATE_LIMIT_ADMIN_LOGIN = "3 per minute; 10 per hour"
+RATE_LIMIT_SIGNUP = "3 per minute"
+RATE_LIMIT_REFRESH = "10 per minute"
+ADMIN_LOCKOUT_MINUTES = 30
+ADMIN_FAIL_THRESHOLD = 5
+USER_LOCKOUT_MINUTES = 60
+USER_FAIL_THRESHOLD = 10
 
 def is_strong_password(password: str) -> tuple[bool, str]:
     """Return (is_valid, error_message)"""
-    if len(password) < 10:
-        return False, "Password must be at least 10 characters"
+    if len(password) < 12:
+        return False, "Password must be at least 12 characters long"
     if not re.search(r"[A-Z]", password):
-        return False, "Password must contain at least one uppercase letter"
+        return False, "Must contain at least one uppercase letter"
     if not re.search(r"[a-z]", password):
-        return False, "Password must contain at least one lowercase letter"
+        return False, "Must contain at least one lowercase letter"
     if not re.search(r"[0-9]", password):
-        return False, "Password must contain at least one number"
+        return False, "Must contain at least one number"
     if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
-        return False, "Password must contain at least one special character"
+        return False, "Must contain at least one special character"
     return True, ""
 
-
-# ────────────────────────────────
+# ────────────────────────────────────────────────
 # POST /api/auth/signup
-# ────────────────────────────────
+# ────────────────────────────────────────────────
 @bp.route("/signup", methods=["POST"])
-@limiter.limit("3 per minute")  # prevent spam
+@limiter.limit(RATE_LIMIT_SIGNUP)
+@cross_origin(origins=["http://localhost:5173", "*"])
 def signup():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
@@ -61,29 +78,33 @@ def signup():
         return jsonify({"error": pw_msg}), 400
 
     try:
-        # Check if email exists
+        # Check if email already registered
         existing = supabase.table("profiles").select("id").eq("email", email).maybe_single().execute()
         if existing.data:
             return jsonify({"error": "Email already registered"}), 409
 
+        # Create user in Supabase Auth
         sign_up = supabase.auth.sign_up({
             "email": email,
             "password": password,
-            "options": {"data": {"full_name": full_name, "phone": phone, "role": role}}
+            "options": {
+                "data": {"full_name": full_name, "phone": phone, "role": role}
+            }
         })
 
         user = sign_up.user
         if not user:
             return jsonify({"error": "User creation failed"}), 500
 
-        # Insert profile
+        # Insert profile record
         profile_data = {
             "id": user.id,
             "full_name": full_name,
             "email": email,
             "phone": phone,
             "role": role,
-            "created_at": "now()"
+            "created_at": "now()",
+            "updated_at": "now()"
         }
         supabase.table("profiles").insert(profile_data).execute()
 
@@ -100,8 +121,8 @@ def signup():
                 "email_confirmation_sent": True
             }), 200
 
-        access = create_access_token(identity=user.id)
-        refresh = create_refresh_token(identity=user.id)
+        access = create_access_token(identity=str(user.id))
+        refresh = create_refresh_token(identity=str(user.id))
 
         return jsonify({
             "success": True,
@@ -121,17 +142,17 @@ def signup():
         return jsonify({"error": "Failed to create account"}), 500
 
 
-# ───────────────────────────────────────────────────
-# POST /api/auth/login  (regular users: buyer/seller)
-# ───────────────────────────────────────────────────
+# ────────────────────────────────────────────────
+# POST /api/auth/login (regular users: buyer/seller)
+# ────────────────────────────────────────────────
 @bp.route("/login", methods=["POST"])
 @cross_origin(origins=["http://localhost:5173", "*"])
-@limiter.limit("5 per minute; 20 per hour")
+@limiter.limit(RATE_LIMIT_LOGIN)
 def login():
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
-    otp = data.get("otp")  # optional: 2FA code
+    otp = data.get("otp")
 
     if not email or not password:
         return jsonify({"error": "Email and password required"}), 400
@@ -140,7 +161,6 @@ def login():
     fail_key = f"login_fail:{email}:{ip}"
     lock_key = f"login_lock:{email}:{ip}"
 
-    # 1. Check if account is locked
     if safe_redis_call("exists", lock_key):
         ttl = safe_redis_call("ttl", lock_key, default=0)
         return jsonify({
@@ -154,76 +174,66 @@ def login():
         })
 
         if not auth_resp.user:
-            # Failed attempt → increment counter
-            fails = safe_redis_call("incr", fail_key, default=0)
-            safe_redis_call("expire", fail_key, 3600)  # 1 hour window
+            fails = safe_redis_call("incr", fail_key, default=0) or 0
+            safe_redis_call("expire", fail_key, 3600)
 
-            if fails >= 10:
-                safe_redis_call("setex", lock_key, 3600, "locked")  # 1 hour lockout
-                log_action(None, "account_locked", details={"email": email, "ip": ip, "fails": fails})
-                return jsonify({
-                    "error": "Too many failed attempts. Account locked for 1 hour"
-                }), 429
+            if fails >= USER_FAIL_THRESHOLD:
+                safe_redis_call("setex", lock_key, USER_LOCKOUT_MINUTES * 60, "locked")
+                log_action(None, "account_locked", {"email": email, "ip": ip, "fails": fails})
+                return jsonify({"error": "Too many failed attempts. Locked for 1 hour"}), 429
 
-            log_action(None, "failed_login", details={"email": email, "ip": ip, "attempt": fails})
+            log_action(None, "failed_login", {"email": email, "ip": ip, "attempt": fails})
             return jsonify({"error": "Invalid email or password"}), 401
 
         user = auth_resp.user
 
-        # Fetch profile
         profile_res = supabase.table("profiles")\
             .select("id, full_name, role, avatar_url, phone, is_verified, banned, two_factor_enabled")\
             .eq("id", user.id)\
             .maybe_single().execute()
 
-        profile = profile_res.data if profile_res and profile_res.data else {}
+        profile = profile_res.data or {}
 
-        # Block banned users
         if profile.get("banned", False):
             return jsonify({"error": "Account is banned"}), 403
 
-        # Require email confirmation for new accounts
         if not user.email_confirmed_at:
             return jsonify({
-                "error": "Please confirm your email first. Check your inbox.",
+                "error": "Please confirm your email first",
                 "needs_confirmation": True
             }), 403
 
-        # 2FA enforcement (if enabled)
         if profile.get("two_factor_enabled", False) and not otp:
-            # Tell frontend to prompt for 2FA code
             return jsonify({
                 "success": True,
                 "requires_2fa": True,
-                "message": "2FA code required",
-                "factor_id": "totp"  # or fetch real factor_id if multiple
+                "message": "2FA code required"
             }), 200
 
         if profile.get("two_factor_enabled", False) and otp:
-            # Verify 2FA code
             try:
-                verified = supabase.auth.mfa.verify({
-                    "factor_id": "totp",  # adjust if you store factor_id in profile
-                    "code": otp
-                })
+                factors = supabase.auth.mfa.list_user_factors()
+                totp_factor = next((f for f in factors if f.factor_type == "totp"), None)
+                if not totp_factor:
+                    return jsonify({"error": "No 2FA factor found"}), 400
+
+                verified = supabase.auth.mfa.verify({"factor_id": totp_factor.id, "code": otp})
                 if not verified:
                     return jsonify({"error": "Invalid 2FA code"}), 401
             except Exception as e:
-                logger.error(f"2FA verification failed: {str(e)}")
+                logger.error(f"2FA verify failed: {str(e)}")
                 return jsonify({"error": "2FA verification failed"}), 401
 
-        # Reset failed attempts on success
-        safe_redis_call("delete", fail_key)
-        safe_redis_call("delete", lock_key)
+        safe_redis_call("del", fail_key)
+        safe_redis_call("del", lock_key)
 
-        access = create_access_token(identity=user.id)
-        refresh = create_refresh_token(identity=user.id)
+        access = create_access_token(identity=str(user.id))
+        refresh = create_refresh_token(identity=str(user.id))
 
-        log_action(
-            actor_id=user.id,
-            action="user_login",
-            details={"email": email, "role": profile.get("role", "unknown")}
-        )
+        log_action(user.id, "user_login", {
+            "email": email,
+            "role": profile.get("role", "unknown")
+        })
 
         return jsonify({
             "success": True,
@@ -238,149 +248,109 @@ def login():
         }), 200
 
     except Exception as e:
-        error_str = str(e).lower()
-        logger.error(f"Login failed for {email}: {error_str}", exc_info=True)
+        logger.error(f"Login failed for {email}: {str(e)}", exc_info=True)
 
-        # Count failed attempt even on exception
-        fails = safe_redis_call("incr", fail_key, default=0)
+        fails = safe_redis_call("incr", fail_key, default=0) or 0
         safe_redis_call("expire", fail_key, 3600)
-        if fails >= 10:
-            safe_redis_call("setex", lock_key, 3600, "locked")
+        if fails >= USER_FAIL_THRESHOLD:
+            safe_redis_call("setex", lock_key, USER_LOCKOUT_MINUTES * 60, "locked")
 
-        return jsonify({"error": "Login failed. Please try again later."}), 500
+        return jsonify({"error": "Login failed. Please try again."}), 500
 
 
 # ────────────────────────────────────────────────
-# POST /api/auth/admin-login  (admin only)
+# POST /api/auth/admin-login
 # ────────────────────────────────────────────────
-@bp.route("/admin-login", methods=["POST", "OPTIONS"])
+@bp.route("/admin-login", methods=["POST"])
 @cross_origin(origins=["http://localhost:5173", "*"])
-@limiter.limit("3 per minute; 10 per hour")
+@limiter.limit(RATE_LIMIT_ADMIN_LOGIN)
 def admin_login():
-    """
-    Admin-only login endpoint - FIXED for your exact schema
-    """
-    if request.method == "OPTIONS":
-        return "", 204
-
     data = request.get_json(silent=True) or {}
     email = (data.get("email") or "").strip().lower()
     password = data.get("password") or ""
     otp = data.get("otp")
 
     if not email or not password:
-        return jsonify({"error": "Email and password are required"}), 400
+        return jsonify({"error": "Email and password required"}), 400
 
     ip = request.remote_addr
     fail_key = f"admin_fail:{email}:{ip}"
     lock_key = f"admin_lock:{email}:{ip}"
 
-    # Check if account is locked
-    if safe_redis_call("exists", lock_key, default=False):
+    if safe_redis_call("exists", lock_key):
         ttl = safe_redis_call("ttl", lock_key, default=0)
         return jsonify({
             "error": f"Too many failed attempts. Locked for {ttl // 60 + 1} minutes"
         }), 429
 
     try:
-        # 1. Supabase Auth
         auth_res = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
         })
 
-        user = getattr(auth_res, "user", None)
+        user = auth_res.user
         if not user:
-            # Increment failure counter
             fails = safe_redis_call("incr", fail_key, default=0) or 0
             safe_redis_call("expire", fail_key, 1800)
 
-            if fails >= 5:
-                safe_redis_call("setex", lock_key, 1800, "locked")
-                log_action(None, "admin_account_locked", details={
-                    "email": email, "ip": ip, "fails": fails
-                })
-                return jsonify({"error": "Too many failed attempts. Locked for 30 minutes"}), 429
+            if fails >= ADMIN_FAIL_THRESHOLD:
+                safe_redis_call("setex", lock_key, ADMIN_LOCKOUT_MINUTES * 60, "locked")
+                log_action(None, "admin_account_locked", {"email": email, "ip": ip, "fails": fails})
+                return jsonify({"error": f"Too many failed attempts. Locked for {ADMIN_LOCKOUT_MINUTES} minutes"}), 429
 
-            log_action(None, "failed_admin_login", details={"email": email, "ip": ip})
-            logger.warning(f"Admin login failed for {email}: invalid credentials")
+            log_action(None, "failed_admin_login", {"email": email, "ip": ip})
             return jsonify({"error": "Invalid email or password"}), 401
 
-        # 2. FIXED: Safe admin verification with try/catch
-        admin = None
-        try:
-            # Try single record fetch - fails cleanly on no record
-            admin_res = supabase.table("admins")\
-                .select("admin_level, permissions, last_login")\
-                .eq("id", user.id)\
-                .single()\
-                .execute()
-            admin = admin_res.data
-            
-        except Exception as admin_error:
-            error_str = str(admin_error).lower()
-            
-            # Handle all "no record" cases (PGRST116=not found, 204, 406, etc.)
-            if any(x in error_str for x in ["pgrst116", "not found", "no rows", "204", "406"]):
-                log_action(None, "admin_login_denied", details={
-                    "email": email,
-                    "reason": "no_admin_record",
-                    "user_id": str(user.id)
-                })
-                logger.info(f"No admin record for {email} (id: {user.id})")
-                return jsonify({
-                    "error": "This account is not registered as an admin. Contact support."
-                }), 403
-            
-            # Log real Supabase errors
-            logger.error(f"Admin query failed for {user.id}: {admin_error}")
-            return jsonify({"error": "Admin verification failed - server error"}), 500
+        # Verify admin record
+        admin_res = supabase.table("admins").select("admin_level, permissions, last_login").eq("id", user.id).single().execute()
+        admin = admin_res.data
 
-        # 3. FIXED: Fetch profile (MATCHES YOUR EXACT SCHEMA - NO email_confirmed_at)
-        profile_res = supabase.table("profiles")\
-            .select("full_name, avatar_url, two_factor_enabled")\
-            .eq("id", user.id)\
-            .single()\
-            .execute()
-        profile = getattr(profile_res, 'data', {})
+        if not admin:
+            log_action(None, "admin_login_denied", {"email": email, "reason": "no_admin_record"})
+            return jsonify({"error": "Not registered as admin"}), 403
 
-        # 4. Email confirmation check - USE Supabase auth.user (ALWAYS exists)
+        # Email confirmation
         if not user.email_confirmed_at:
-            return jsonify({
-                "error": "Admin email not confirmed. Check your inbox.",
-                "needs_confirmation": True
-            }), 403
+            return jsonify({"error": "Email not confirmed", "needs_confirmation": True}), 403
 
-        # 5. 2FA (if enabled)
+        # 2FA check
+        profile_res = supabase.table("profiles").select("two_factor_enabled").eq("id", user.id).single().execute()
+        profile = profile_res.data or {}
+
         if profile.get("two_factor_enabled", False) and not otp:
-            return jsonify({
-                "success": True,
-                "requires_2fa": True,
-                "message": "2FA code required"
-            }), 200
+            return jsonify({"success": True, "requires_2fa": True, "message": "2FA code required"}), 200
 
-        # 6. SUCCESS - Reset counters
+        if profile.get("two_factor_enabled", False) and otp:
+            try:
+                factors = supabase.auth.mfa.list_user_factors()
+                totp_factor = next((f for f in factors if f.factor_type == "totp"), None)
+                if not totp_factor:
+                    return jsonify({"error": "No 2FA factor found"}), 400
+
+                verified = supabase.auth.mfa.verify({"factor_id": totp_factor.id, "code": otp})
+                if not verified:
+                    return jsonify({"error": "Invalid 2FA code"}), 401
+            except Exception as e:
+                logger.error(f"2FA verify failed: {str(e)}")
+                return jsonify({"error": "2FA verification failed"}), 401
+
+        # Success
         safe_redis_call("del", fail_key)
         safe_redis_call("del", lock_key)
 
-        # Update last login
-        supabase.table("admins")\
-            .update({"last_login": "now()"})\
-            .eq("id", user.id)\
-            .execute()
+        supabase.table("admins").update({"last_login": "now()"}).eq("id", user.id).execute()
 
-        # Generate JWT with admin claims
         access = create_access_token(
-            identity=user.id,
+            identity=str(user.id),
             additional_claims={
                 "role": "admin",
                 "admin_level": admin["admin_level"]
             }
         )
-        refresh = create_refresh_token(identity=user.id)
+        refresh = create_refresh_token(identity=str(user.id))
 
-        # Audit success
-        log_action(user.id, "admin_login_success", details={
+        log_action(user.id, "admin_login_success", {
             "email": email,
             "admin_level": admin["admin_level"],
             "ip": ip
@@ -396,111 +366,85 @@ def admin_login():
                 "role": "admin",
                 "admin_level": admin["admin_level"],
                 "permissions": admin.get("permissions", {}),
-                "last_login": admin.get("last_login"),
                 **profile
             }
         }), 200
 
     except Exception as e:
-        error_str = str(e)
-        logger.exception(f"Unexpected admin login error for {email}")
-
-        # Safe failure counting
+        logger.exception(f"Admin login error for {email}")
         fails = safe_redis_call("incr", fail_key, default=0) or 0
         safe_redis_call("expire", fail_key, 1800)
-        if fails >= 5:
-            safe_redis_call("setex", lock_key, 1800, "locked")
+        if fails >= ADMIN_FAIL_THRESHOLD:
+            safe_redis_call("setex", lock_key, ADMIN_LOCKOUT_MINUTES * 60, "locked")
+        return jsonify({"error": "Authentication failed"}), 500
 
-        log_action(None, "failed_admin_login", details={
-            "email": email,
-            "reason": error_str[:200],
-            "ip": ip
-        })
 
-        if "invalid login credentials" in error_str.lower():
-            return jsonify({"error": "Invalid email or password"}), 401
+# ────────────────────────────────────────────────
+# POST /api/auth/refresh
+# ────────────────────────────────────────────────
+@bp.route("/refresh", methods=["POST"])
+def refresh():
+    data = request.get_json(silent=True) or {}
+    refresh_token = data.get("refresh_token")
 
-        return jsonify({
-            "error": "Authentication failed. Please try again.",
-            "details": error_str[:100] if current_app.debug else None
-        }), 500
+    if not refresh_token:
+        return jsonify({"error": "Refresh token required"}), 401
 
-# ────────────────────────────────
+    try:
+        decoded = decode_token(refresh_token)
+        user_id = decoded.get("sub")
+        if not user_id:
+            raise ValueError("Missing user ID in refresh token")
+
+        new_access = create_access_token(identity=user_id)
+        return jsonify({"access_token": new_access}), 200
+
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Refresh token expired"}), 401
+    except jwt.InvalidSignatureError:
+        return jsonify({"error": "Invalid refresh token signature"}), 401
+    except Exception as e:
+        logger.error(f"Refresh failed: {str(e)}")
+        return jsonify({"error": "Invalid refresh token"}), 401
+
+
+# ────────────────────────────────────────────────
+# GET /api/auth/me
+# ────────────────────────────────────────────────
+@bp.route("/me", methods=["GET"])
+@jwt_required()
+def me():
+    user_id = get_jwt_identity()
+    try:
+        profile = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute().data
+        if not profile:
+            return jsonify({"error": "Profile not found"}), 404
+        return jsonify({"user": profile}), 200
+    except Exception as e:
+        logger.error(f"/me failed: {str(e)}")
+        return jsonify({"error": "Failed to fetch user"}), 500
+
+
+# ────────────────────────────────────────────────
 # POST /api/auth/logout
-# ────────────────────────────────
+# ────────────────────────────────────────────────
 @bp.route("/logout", methods=["POST"])
 @jwt_required()
 def logout():
     try:
         jti = get_jwt()["jti"]
-        expires = get_jwt()["exp"] - int(datetime.utcnow().timestamp()) + 3600
-        safe_redis_call("setex", f"blacklist:{jti}", expires, "true")
-
-        log_action(
-            actor_id=get_jwt_identity(),
-            action="logout"
-        )
-
-        return jsonify({"success": True, "message": "Logged out successfully"}), 200
-
+        exp = get_jwt()["exp"] - int(time.time()) + 3600
+        safe_redis_call("setex", f"blacklist:{jti}", exp, "true")
+        log_action(get_jwt_identity(), "logout")
+        return jsonify({"success": True, "message": "Logged out"}), 200
     except Exception as e:
         logger.warning(f"Logout issue: {str(e)}")
-        return jsonify({"success": True, "message": "Logged out"}), 200
+        return jsonify({"success": True}), 200
 
 
-# ────────────────────────────────
-# POST /api/auth/refresh
-# ────────────────────────────────
-@bp.route("/refresh", methods=["POST"])
-@jwt_required(refresh=True)
-def refresh_token():
-    current_user_id = get_jwt_identity()
-    new_access_token = create_access_token(identity=current_user_id)
-
-    return jsonify({
-        "success": True,
-        "access_token": new_access_token
-    }), 200
-
-
-# ────────────────────────────────
-# GET /api/auth/me
-# ────────────────────────────────
-@bp.route("/me", methods=["GET"])
-@jwt_required()
-def get_current_user():
-    user_id = get_jwt_identity()
-    try:
-        profile = supabase.table("profiles").select("*").eq("id", user_id).maybe_single().execute().data
-
-        if not profile:
-            return jsonify({"error": "Profile not found"}), 404
-
-        return jsonify({"success": True, "user": profile}), 200
-
-    except Exception as e:
-        logger.error(f"/me failed for {user_id}: {str(e)}", exc_info=True)
-        return jsonify({"error": "Failed to fetch user info"}), 500
-
-
-# ────────────────────────────────
-# GET /api/auth/debug/supabase
-# ────────────────────────────────
-@bp.route("/debug/supabase", methods=["GET"])
-@jwt_required()
-def debug_supabase():
-    try:
-        test = supabase.table("profiles").select("count(*)", count="exact").execute()
-        status = {
-            "connected": True,
-            "row_count_profiles": test.count or 0,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        return jsonify(status), 200
-    except Exception as e:
-        return jsonify({"connected": False, "error": str(e)}), 500
-    
+# ────────────────────────────────────────────────
 # POST /api/auth/verify-email
+# ────────────────────────────────────────────────
 @bp.route("/verify-email", methods=["POST"])
 def verify_email():
     data = request.get_json(silent=True) or {}
@@ -510,7 +454,6 @@ def verify_email():
         return jsonify({"error": "Verification token required"}), 400
 
     try:
-        # Supabase handles email confirmation token verification
         verified = supabase.auth.verify_otp({
             "token_hash": token,
             "type": "signup"
@@ -521,13 +464,11 @@ def verify_email():
 
         user_id = verified.user.id
 
-        # Update profile to mark as verified (if you have such a field)
         supabase.table("profiles")\
             .update({"email_verified": True, "updated_at": "now()"})\
             .eq("id", user_id)\
             .execute()
 
-        # Optional: create access/refresh tokens after confirmation
         access = create_access_token(identity=user_id)
         refresh = create_refresh_token(identity=user_id)
 
@@ -543,25 +484,26 @@ def verify_email():
     except Exception as e:
         logger.error(f"Email verification failed: {str(e)}")
         return jsonify({"error": "Verification failed"}), 400
-    
+
+
+# ────────────────────────────────────────────────
 # POST /api/auth/2fa/setup
+# ────────────────────────────────────────────────
 @bp.route("/2fa/setup", methods=["POST"])
 @jwt_required()
 def setup_2fa():
     user_id = get_jwt_identity()
 
     try:
-        # Supabase built-in TOTP support (you need to enable it in dashboard first)
         factor = supabase.auth.mfa.enroll({
             "factor_type": "totp",
-            "issuer": "GigConnect",
+            "issuer": "D's Virtual Space",
             "user_id": user_id
         })
 
         if not factor:
             return jsonify({"error": "Failed to start 2FA setup"}), 500
 
-        # Return QR code data URI or secret for frontend to display
         return jsonify({
             "success": True,
             "qr_code": factor.totp.qr_code,           # base64 data URI
@@ -574,7 +516,9 @@ def setup_2fa():
         return jsonify({"error": "Failed to setup 2FA"}), 500
 
 
+# ────────────────────────────────────────────────
 # POST /api/auth/2fa/verify
+# ────────────────────────────────────────────────
 @bp.route("/2fa/verify", methods=["POST"])
 @jwt_required()
 def verify_2fa():
@@ -595,7 +539,6 @@ def verify_2fa():
         if not verified:
             return jsonify({"error": "Invalid 2FA code"}), 401
 
-        # Mark 2FA as enabled in profile (optional)
         supabase.table("profiles")\
             .update({"two_factor_enabled": True, "updated_at": "now()"})\
             .eq("id", user_id)\
@@ -610,7 +553,9 @@ def verify_2fa():
         return jsonify({"error": "Verification failed"}), 400
 
 
+# ────────────────────────────────────────────────
 # POST /api/auth/2fa/disable
+# ────────────────────────────────────────────────
 @bp.route("/2fa/disable", methods=["POST"])
 @jwt_required()
 def disable_2fa():
@@ -622,8 +567,6 @@ def disable_2fa():
         return jsonify({"error": "2FA code required to disable"}), 400
 
     try:
-        # You need to verify current 2FA code before disabling
-        # (requires active factor – you can get it from enroll or list)
         factors = supabase.auth.mfa.list_user_factors()
         totp_factor = next((f for f in factors if f.factor_type == "totp"), None)
 
@@ -652,8 +595,11 @@ def disable_2fa():
     except Exception as e:
         logger.error(f"2FA disable failed for {user_id}: {str(e)}")
         return jsonify({"error": "Failed to disable 2FA"}), 400
-    
-# POST /api/auth/reset-password/confirm (optional extra step)
+
+
+# ────────────────────────────────────────────────
+# POST /api/auth/reset-password/confirm
+# ────────────────────────────────────────────────
 @bp.route("/reset-password/confirm", methods=["POST"])
 def reset_password_confirm():
     data = request.get_json(silent=True) or {}
@@ -663,7 +609,6 @@ def reset_password_confirm():
     if not token or not password:
         return jsonify({"error": "Token and new password required"}), 400
 
-    # Same as your existing reset logic
     try:
         res = supabase.auth.update_user({"password": password})
 
@@ -676,7 +621,8 @@ def reset_password_confirm():
     except Exception as e:
         logger.error(f"Reset confirm error: {str(e)}")
         return jsonify({"error": "Failed to reset password"}), 500
-    
+
+
 # ────────────────────────────────────────────────
 # POST /api/auth/oauth/<provider> → Generate OAuth URL
 # ────────────────────────────────────────────────
@@ -809,7 +755,11 @@ def oauth_callback():
             "error": "Failed to complete OAuth login",
             "details": str(e)
         }), 500
-    
+
+
+# ────────────────────────────────────────────────
+# POST /api/auth/test-supabase-login (debug only – remove in production)
+# ────────────────────────────────────────────────
 @bp.route("/test-supabase-login", methods=["POST"])
 def test_supabase_login():
     data = request.get_json()
@@ -824,3 +774,11 @@ def test_supabase_login():
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ────────────────────────────────────────────────
+# You can now split further (future):
+# - Move 2FA endpoints to auth/2fa.py
+# - Move OAuth to auth/oauth.py
+# - Move debug/test to separate debug blueprint
+# ────────────────────────────────────────────────

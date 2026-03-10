@@ -1,4 +1,4 @@
-# services/auth_service/app/utils/audit.py
+# server/app/utils/audit.py
 """
 Audit logging helper - logs actions to console + Redis list.
 """
@@ -6,7 +6,7 @@ Audit logging helper - logs actions to console + Redis list.
 import logging
 from datetime import datetime
 from flask import request, current_app
-from ..extensions import redis_client
+from app.extensions import redis_client
 
 logger = logging.getLogger(__name__)
 
