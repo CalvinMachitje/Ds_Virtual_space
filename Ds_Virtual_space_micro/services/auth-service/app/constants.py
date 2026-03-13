@@ -1,4 +1,4 @@
-# services/auth-service/app/routes/auth/constants.py
+# services/auth-service/app/constants.py
 # Rate limits
 RATE_LIMIT_LOGIN = "5 per minute; 20 per hour"
 RATE_LIMIT_ADMIN_LOGIN = "3 per minute; 10 per hour"

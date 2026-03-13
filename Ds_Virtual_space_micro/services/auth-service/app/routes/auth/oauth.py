@@ -1,12 +1,12 @@
 # services/auth-service/app/routes/auth/oauth.py
 from flask import Blueprint, request, jsonify, current_app
 import logging
-from services.supabase_service import supabase
-from utils.audit import log_action
+from app.services.supabase_service import supabase
+from app.utils.audit import log_action
 from flask_jwt_extended import create_access_token, create_refresh_token
 from app.utils.event_bus import publish_event  # Redis event bus
 
-bp = Blueprint("auth_routes", __name__)
+bp = Blueprint("auth_oauth_bp", __name__, url_prefix="/oauth")
 logger = logging.getLogger(__name__)
 
 @bp.route("/ping")

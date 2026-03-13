@@ -39,7 +39,7 @@ class SupabaseService:
             timeout=httpx.Timeout(30.0, connect=10.0, read=30.0, pool=30.0),
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
             transport=httpx.HTTPTransport(retries=3),
-            http2=False,
+            http2=True,
             follow_redirects=True
         )
 

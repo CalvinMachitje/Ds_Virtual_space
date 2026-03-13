@@ -2,11 +2,11 @@
 from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 import logging
-from services.supabase_service import supabase
-from utils.audit import log_action
+from app.services.supabase_service import supabase
+from app.utils.audit import log_action
 from app.utils.event_bus import publish_event  # Redis event publisher
 
-bp = Blueprint("auth_routes", __name__)
+bp = Blueprint("auth_twofa_bp", __name__, url_prefix="/2fa")
 logger = logging.getLogger(__name__)
 
 @bp.route("/ping")
