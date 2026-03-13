@@ -1,11 +1,20 @@
-from flask import request, jsonify, current_app
+# services/auth-service/app/routes/auth/twofa.py
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 import logging
 from services.supabase_service import supabase
 from utils.audit import log_action
+from app.utils.event_bus import publish_event  # Redis event publisher
 
-bp = current_app.blueprints.get("auth")
+bp = Blueprint("auth_routes", __name__)
 logger = logging.getLogger(__name__)
+
+@bp.route("/ping")
+def ping():
+    logger.info("Ping endpoint called")
+    # Use current_app inside function if needed
+    current_app.logger.debug("Debug log inside route")
+    return jsonify({"pong": True})
 
 # ──────────────────────────
 # POST /2fa/setup
@@ -22,6 +31,13 @@ def setup_2fa():
         })
         if not factor:
             return jsonify({"error": "Failed to start 2FA setup"}), 500
+
+        # Publish event: 2FA setup started
+        publish_event("auth.events", {
+            "event": "2fa_setup_started",
+            "user_id": user_id
+        })
+
         return jsonify({
             "success": True,
             "qr_code": factor.totp.qr_code,
@@ -52,6 +68,13 @@ def verify_2fa():
 
         supabase.table("profiles").update({"two_factor_enabled": True, "updated_at": "now()"}).eq("id", user_id).execute()
         log_action(user_id, "2fa_enabled")
+
+        # Publish event: 2FA enabled
+        publish_event("auth.events", {
+            "event": "2fa_enabled",
+            "user_id": user_id
+        })
+
         return jsonify({"success": True, "message": "2FA enabled"}), 200
     except Exception as e:
         logger.error(f"2FA verify failed for {user_id}: {str(e)}")
@@ -82,6 +105,13 @@ def disable_2fa():
         supabase.auth.mfa.unenroll(totp_factor.id)
         supabase.table("profiles").update({"two_factor_enabled": False, "updated_at": "now()"}).eq("id", user_id).execute()
         log_action(user_id, "2fa_disabled")
+
+        # Publish event: 2FA disabled
+        publish_event("auth.events", {
+            "event": "2fa_disabled",
+            "user_id": user_id
+        })
+
         return jsonify({"success": True, "message": "2FA disabled"}), 200
     except Exception as e:
         logger.error(f"2FA disable failed for {user_id}: {str(e)}")
@@ -97,6 +127,12 @@ def verify_2fa_code(user_id: str, code: str) -> bool:
         if not totp_factor:
             return False
         verified = supabase.auth.mfa.verify({"factor_id": totp_factor.id, "code": code})
+        if verified:
+            # Publish event: 2FA code verified (for login flow)
+            publish_event("auth.events", {
+                "event": "2fa_verified",
+                "user_id": user_id
+            })
         return bool(verified)
     except Exception as e:
         logger.error(f"verify_2fa_code failed for {user_id}: {str(e)}")

@@ -1,4 +1,5 @@
 
+# services/auth-service/app/extensions.py
 """
 Centralized Flask extensions for auth-service microservice.
 All extensions are created here and initialized via init_extensions().
