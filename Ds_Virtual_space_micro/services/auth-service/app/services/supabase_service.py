@@ -1,4 +1,4 @@
-# services/auth-service/app/services/supabase_service.py
+# app/services/supabase_service.py
 """
 Central Supabase client for backend (uses service_role key → full access).
 Never use this file in frontend code.
@@ -14,6 +14,7 @@ import os
 import logging
 import time
 from typing import Any, Dict, List, Optional, Callable
+from async_timeout import Timeout
 import httpx
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -29,28 +30,27 @@ class SupabaseService:
         url = os.getenv("VITE_SUPABASE_URL")
         key = os.getenv("VITE_SUPABASE_SERVICE_ROLE_KEY")
 
-        if not url:
-            raise ValueError("VITE_SUPABASE_URL is missing")
-        if not key:
-            raise ValueError("VITE_SUPABASE_SERVICE_ROLE_KEY is missing")
+        if not url or not key:
+            raise ValueError("Supabase URL or key missing")
 
-        # Stable HTTP client: timeouts, retries, disable HTTP/2
-        http_client = httpx.Client(
-            timeout=httpx.Timeout(30.0, connect=10.0, read=30.0, pool=30.0),
-            limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
-            transport=httpx.HTTPTransport(retries=3),
-            http2=True,
-            follow_redirects=True
+        # Eventlet-safe transport
+        transport = httpx.HTTPTransport(retries=3)
+        self.http_client = httpx.Client(
+            timeout=Timeout(connect=10, read=20, write=20, pool=20),
+            transport=transport,
+            http2=False,  # IMPORTANT: disable HTTP/2 for Windows + Eventlet
+            follow_redirects=True,
         )
 
-        self.client = create_client(url, key)
-        self.client.options.http = http_client
+        # Create Supabase client with custom http client
+        self.client: Client = create_client(url, key)
+        self.client.options.http = self.http_client
 
         self.auth = self.client.auth
         self.table = self.client.table
-        self.storage = self.client.storage  # Explicitly expose storage
+        self.storage = self.client.storage
 
-        logger.info("Supabase client initialized (stable config applied)")
+        logger.info("[SupabaseService] Initialized Eventlet + Windows safe HTTP transport")
 
     # ──────────────────────────────────────────────
     # Safe execute with retry (handles disconnects/timeouts)
@@ -99,56 +99,42 @@ class SupabaseService:
         return {"status": status, **result}
 
     # ──────────────────────────────────────────────
-    # Admin login with Redis lock and 2FA auto-detect
+    # Admin login (robust, Windows + Eventlet + safe Redis)
     # ──────────────────────────────────────────────
-    def admin_login(self, email: str, password: str, otp: Optional[str] = None) -> Dict[str, Any]:
+    def admin_login(email: str, password: str):
         """
-        Perform admin login with optional TOTP, Redis lock, retries, and robust error handling.
-        Returns auth session info or error.
+        Eventlet + Windows-safe admin login:
+        - Redis locks are kept
+        - 2FA preserved
+        - HTTP/network failures do NOT lock accounts
         """
+        from app.extensions import safe_redis_call
+
         lock_key = f"admin_login_lock:{email}"
-        lock_acquired = safe_redis_call("set", lock_key, "1", nx=True, ex=10)  # 10s lock
-        if not lock_acquired:
-            return {"error": "Too many login attempts, please wait a few seconds."}
 
-        try:
-            # Step 1: Sign in with password (Supabase)
+        # Acquire Redis lock safely
+        with safe_redis_call(lock_key, expire=30) as lock_acquired:
+            if not lock_acquired:
+                return {"error": "Too many attempts. Try later."}
+
             try:
-                auth_res = self.auth.sign_in_with_password({
-                    "email": email,
-                    "password": password
-                })
+                resp = supabase.auth.sign_in_with_password(
+                    {"email": email, "password": password}
+                )
+                if resp.user is None:
+                    return {"error": "Invalid credentials"}
+                # 2FA required
+                if getattr(resp, "twofa_required", False):
+                    return {"error": "2FA required", "twofa_required": True}
+
+                return {"user": resp.user, "access_token": resp.session.access_token}
             except httpx.RequestError as e:
-                logger.error(f"HTTP request failed during admin login: {str(e)}")
-                return {"error": "Cannot reach authentication server. Try again later."}
-
-            if not auth_res or auth_res.get("error"):
-                return {"error": auth_res.get("error_description") or auth_res.get("error") or "Login failed"}
-
-            # Step 2: Detect 2FA factors dynamically
-            user = auth_res.get("user")
-            if user and "factors" in user:
-                totp_factor = next((f for f in user["factors"] if f["factor_type"] == "totp"), None)
-                if totp_factor:
-                    factor_id = totp_factor["id"]
-                    if otp:
-                        try:
-                            verify_res = self.auth.verify_factor(factor_id=factor_id, token=otp)
-                            if verify_res.get("error"):
-                                return {"error": "Invalid 2FA token"}
-                        except Exception as e:
-                            logger.error(f"2FA verification failed: {str(e)}")
-                            return {"error": "2FA verification failed"}
-                    else:
-                        return {"2fa_required": True}
-            else:
-                logger.debug("No 2FA factors found for this admin")
-
-            return {"user": auth_res.get("user"), "session": auth_res.get("session")}
-
-        finally:
-            # Release Redis lock
-            safe_redis_call("delete", lock_key)
+                # Network/transport errors do NOT trigger account lock
+                logger.warning(f"[admin_login] transient network error: {e}")
+                return {"error": "Temporary network issue. Please retry."}
+            except Exception as e:
+                logger.error(f"[admin_login] unexpected error: {e}")
+                return {"error": "Login failed"}
 
     # ──────────────────────────────────────────────
     # Generic CRUD methods

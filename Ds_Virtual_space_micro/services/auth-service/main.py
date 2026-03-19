@@ -1,3 +1,4 @@
+# services/auth-service/main.py
 import os
 from dotenv import load_dotenv
 
