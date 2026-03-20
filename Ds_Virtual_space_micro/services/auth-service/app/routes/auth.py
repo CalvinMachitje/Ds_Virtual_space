@@ -10,8 +10,9 @@ from app.dependencies.rate_limiter import limiter
 from app.services.supabase_service import supabase
 from app.utils.audit import log_action
 from app.utils.event_bus import publish_event
-from app.utils.utils import generate_tokens, is_strong_password, blacklist_jwt, safe_redis_call
-from .twofa import verify_2fa_code  # import helper
+from utils.redis_utils import safe_redis_call
+from utils.utils import blacklist_jwt, generate_tokens, is_strong_password
+from .twofa import verify_2fa_code
 
 router = APIRouter(tags=["auth"])
 

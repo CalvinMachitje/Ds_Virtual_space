@@ -1,11 +1,11 @@
+# services/auth-service/app/utils/audit.py
 import logging
 from datetime import datetime
-from flask import request  # ← only used if you still have flask request; otherwise remove
-from app.extensions import safe_redis_call
+
+from .redis_utils import safe_redis_call
 
 
 logger = logging.getLogger(__name__)
-
 
 def log_action(actor_id: str | None, action: str, details: dict | None = None, ip: str | None = None):
     if actor_id is None:

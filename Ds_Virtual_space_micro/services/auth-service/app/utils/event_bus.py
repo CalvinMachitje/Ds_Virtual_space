@@ -1,6 +1,7 @@
+# services/auth-service/app/utils/event_bus.py
 import json
 import logging
-from app.extensions import redis_client
+from app.utils.redis_utils import redis_client
 
 
 logger = logging.getLogger(__name__)

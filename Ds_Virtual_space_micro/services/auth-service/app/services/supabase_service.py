@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Callable
 import httpx
 from supabase import create_client, Client
 from dotenv import load_dotenv
-from app.extensions import redis_client, safe_redis_call
+from app.utils.redis_utils import redis_client, safe_redis_call
 
 load_dotenv()  # Load .env
 
@@ -26,15 +26,15 @@ logger = logging.getLogger(__name__)
 
 class SupabaseService:
     def __init__(self):
-        url = os.getenv("VITE_SUPABASE_URL")
-        key = os.getenv("VITE_SUPABASE_SERVICE_ROLE_KEY")
+        url = os.getenv("SUPABASE_URL")
+        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
         if not url:
-            raise ValueError("VITE_SUPABASE_URL is missing")
+            raise ValueError("SUPABASE_URL is missing from environment variables or .env")
         if not key:
-            raise ValueError("VITE_SUPABASE_SERVICE_ROLE_KEY is missing")
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY is missing from environment variables or .env")
 
-        # Stable HTTP client: timeouts, retries, disable HTTP/2
+        # Stable HTTP client...
         http_client = httpx.Client(
             timeout=httpx.Timeout(30.0, connect=10.0, read=30.0, pool=30.0),
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
@@ -48,9 +48,9 @@ class SupabaseService:
 
         self.auth = self.client.auth
         self.table = self.client.table
-        self.storage = self.client.storage  # Explicitly expose storage
+        self.storage = self.client.storage
 
-        logger.info("Supabase client initialized (stable config applied)")
+        logger.info("Supabase client initialized with service role key")
 
     # ──────────────────────────────────────────────
     # Safe execute with retry (handles disconnects/timeouts)

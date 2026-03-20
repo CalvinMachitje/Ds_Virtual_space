@@ -1,8 +1,10 @@
+# services/auth-service/app/dependencies/auth.py
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+from jose import JWTError
+import jwt
 from app.core.config import settings
-from app.extensions import safe_redis_call
+from utils.redis_utils import safe_redis_call
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")

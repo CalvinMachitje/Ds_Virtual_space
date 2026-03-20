@@ -1,3 +1,4 @@
+# services/auth-service/app/dependencies/rate_limiter.py
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from app.core.config import settings

@@ -13,7 +13,6 @@ from app.dependencies.rate_limiter import limiter
 from app.routes.admin import router as admin_router
 from app.routes.auth import router as auth_router
 from app.routes.oauth import router as oauth_router
-from app.routes.routes import router as core_router  
 from app.routes.twofa import router as twofa_router
 from app.services.supabase_service import supabase
 from app.utils.event_bus import publish_event
@@ -67,7 +66,6 @@ app.add_middleware(
 )
 
 # Register all routers under /api/auth
-app.include_router(core_router, prefix="/api/auth", tags=["auth"])        # main user endpoints
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin_router, prefix="/api/auth", tags=["admin"])
 app.include_router(oauth_router, prefix="/api/auth", tags=["oauth"])

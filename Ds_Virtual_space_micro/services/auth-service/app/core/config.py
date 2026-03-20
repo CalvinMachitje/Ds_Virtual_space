@@ -1,4 +1,4 @@
-# app/core/config.py
+# services/auth-service/app/core/config.py
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import List
 
@@ -7,7 +7,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_ignore_empty=True,
-        extra="ignore"
+        extra="ignore",
+        # env_prefix="VITE_"  ← REMOVED THIS LINE → now reads exact variable names from .env
     )
 
     # ── JWT ────────────────────────────────────────────────
@@ -48,3 +49,15 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# ──────────────────────────────────────────────
+# TEMPORARY STARTUP DEBUG – you can remove this block later
+# ──────────────────────────────────────────────
+print("\n" + "=" * 60)
+print("DEBUG: Loaded environment variables from .env")
+print(f"  SUPABASE_URL:          {settings.SUPABASE_URL}")
+print(f"  SUPABASE_SERVICE_ROLE_KEY set?  {'yes' if settings.SUPABASE_SERVICE_ROLE_KEY else 'MISSING'}")
+print(f"  JWT_SECRET_KEY set?            {'yes' if settings.JWT_SECRET_KEY else 'MISSING'}")
+print(f"  REDIS_URL:                     {settings.REDIS_URL}")
+print("=" * 60 + "\n")

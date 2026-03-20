@@ -1,9 +1,12 @@
+# services/auth-service/app/utils/utils.py
 import re
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 from app.core.config import settings
-from app.extensions import safe_redis_call
+
 from app.utils.audit import log_action
+from utils.redis_utils import safe_redis_call
+
 
 
 def is_strong_password(password: str) -> tuple[bool, str]:

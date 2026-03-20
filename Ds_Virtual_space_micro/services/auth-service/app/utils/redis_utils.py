@@ -1,4 +1,4 @@
-# app/utils/redis_utils.py
+# services/auth-service/app/utils/redis_utils.py
 import os
 import logging
 from typing import Any, Optional
