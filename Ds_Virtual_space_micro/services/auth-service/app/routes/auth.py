@@ -15,7 +15,7 @@ from app.utils.extensions import blacklist_jwt, generate_tokens, is_strong_passw
 
 from .twofa import verify_2fa_code
 
-router = APIRouter(tags=["auth"])
+router = APIRouter( tags=["auth"])
 
 
 class SignupRequest(BaseModel):
