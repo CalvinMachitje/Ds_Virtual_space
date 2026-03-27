@@ -1,3 +1,5 @@
+# Authentication dependencies for the Admin Service, including JWT token validation.
+# services/admin-service/app/dependencies/auth.py
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt

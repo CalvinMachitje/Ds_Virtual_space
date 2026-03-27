@@ -48,8 +48,10 @@ export default function AdminDashboard() {
       const token = localStorage.getItem("access_token");
       if (!token) throw new Error("Authentication required");
 
-      const res = await fetch("/api/admin/dashboard", {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await fetch("http://127.0.0.1:5000/api/admin/dashboard", {
+        headers: { 
+          Authorization: `Bearer ${token}` 
+        },
       });
 
       if (!res.ok) {

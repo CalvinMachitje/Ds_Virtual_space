@@ -1,3 +1,5 @@
+# Redis utility functions for the Admin Service, providing a safe way to interact with Redis without crashing the app if Redis is down.
+# services/admin-service/app/utils/redis_utils.py
 import redis
 from functools import wraps
 from app.core.config import settings

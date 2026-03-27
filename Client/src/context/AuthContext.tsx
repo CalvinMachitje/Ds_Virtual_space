@@ -156,12 +156,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     if (socket?.connected) return;
 
-    const newSocket = io(SOCKET_URL, {
-      query: { token: session.access_token },
-      withCredentials: true,
+    const newSocket = io("http://127.0.0.1:5000", {
+      auth: {
+        token: session.access_token
+      },
       transports: ["websocket", "polling"],
       reconnection: true,
       reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
     });
 
     newSocket.on("connect", () => {

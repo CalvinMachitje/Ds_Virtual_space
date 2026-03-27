@@ -1,3 +1,5 @@
+# Main entry point for the Admin Service FastAPI application.
+# services/admin-service/main.py
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware

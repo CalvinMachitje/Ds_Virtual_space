@@ -1,3 +1,5 @@
+# Audit logging utility for the Admin Service, allowing actions to be logged with details and stored in Redis.
+# services/admin-service/app/utils/audit.py
 import logging
 from datetime import datetime
 from app.utils.redis_utils import redis_client

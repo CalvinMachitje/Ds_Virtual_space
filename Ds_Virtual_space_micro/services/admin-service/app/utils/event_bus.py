@@ -1,3 +1,5 @@
+# Event bus utility for the Admin Service, allowing events to be published to Redis pub/sub.
+# services/admin-service/app/utils/event_bus.py
 import json
 from app.utils.redis_utils import redis_client
 

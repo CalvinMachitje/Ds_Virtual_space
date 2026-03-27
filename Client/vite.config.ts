@@ -5,10 +5,9 @@ import path from 'path'
 import tailwindcss from 'tailwindcss'
 import autoprefixer from 'autoprefixer'
 
-// https://vite.dev/config/
 export default defineConfig({
-  // Load .env from monorepo root (one level up)
-  envDir: path.resolve(__dirname, '..'),   // gig-connect/
+  // Load .env from monorepo root
+  envDir: path.resolve(__dirname, '..'),
 
   // Only load variables starting with VITE_
   envPrefix: ['VITE_'],
@@ -19,33 +18,29 @@ export default defineConfig({
     open: true,
 
     proxy: {
-      // Proxy all /api requests to Flask backend on port 5000
+      // === MAIN PROXY: All API calls go through the API Gateway ===
       '/api': {
-        target: 'http://localhost:5001',
+        target: 'http://127.0.0.1:5000',        // ← API Gateway (port 5000)
         changeOrigin: true,
         secure: false,
-        // Keep /api prefix — Flask expects it
-        rewrite: (path) => path,
+        rewrite: (path) => path,                 // Keep /api prefix
       },
 
-      // Proxy WebSocket (Socket.IO)
+      // === Socket.IO WebSocket Proxy ===
       '/socket.io': {
-        target: 'http://localhost:5000',
+        target: 'http://127.0.0.1:5000',        // API Gateway handles Socket.IO
         ws: true,
         changeOrigin: true,
         secure: false,
       },
     },
 
-    // Allow larger payloads for file uploads / Socket.IO
     hmr: {
       clientPort: 5173,
     },
   },
 
-  plugins: [
-    react(),
-  ],
+  plugins: [react()],
 
   resolve: {
     alias: {
@@ -59,22 +54,17 @@ export default defineConfig({
   },
 
   optimizeDeps: {
-    // Critical: Force pre-bundling of Supabase packages
     include: [
       '@supabase/supabase-js',
       '@supabase/auth-js',
-      '@supabase/auth-js/dist/module/GoTrueClient',
-      '@supabase/auth-js/dist/module/GoTrueAdminApi',
       '@supabase/gotrue-js',
       '@supabase/postgrest-js',
       '@supabase/realtime-js',
       '@supabase/storage-js',
     ],
     esbuildOptions: {
-      // Modern target + browser platform fixes ESM resolution issues
       target: 'es2020',
       platform: 'browser',
-      // Reduce noise from esbuild
       logLevel: 'silent',
     },
   },
@@ -82,10 +72,9 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
-    target: 'es2020',  // Modern browsers
+    target: 'es2020',
     minify: 'esbuild',
     commonjsOptions: {
-      // Ignore dynamic requires in Supabase (prevents build errors)
       ignoreDynamicRequires: true,
       transformMixedEsModules: true,
     },
@@ -106,14 +95,10 @@ export default defineConfig({
 
   css: {
     postcss: {
-      plugins: [
-        tailwindcss(),
-        autoprefixer(),
-      ],
+      plugins: [tailwindcss(), autoprefixer()],
     },
   },
 
-  // Suppress noisy esbuild warnings
   esbuild: {
     logOverride: {
       'this-is-undefined-in-esm': 'silent',
@@ -121,20 +106,21 @@ export default defineConfig({
     },
   },
 
-  // For vite preview (production-like testing)
+  // Preview mode (for testing built version)
   preview: {
     port: 4173,
     host: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
+        target: 'http://127.0.0.1:5000',
         changeOrigin: true,
         secure: false,
       },
       '/socket.io': {
-        target: 'http://localhost:5000',
+        target: 'http://127.0.0.1:5000',
         ws: true,
         changeOrigin: true,
+        secure: false,
       },
     },
   },

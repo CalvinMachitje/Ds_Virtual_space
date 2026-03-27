@@ -1,3 +1,5 @@
+# Configuration settings for the Admin Service using Pydantic's BaseSettings.
+# services/admin-service/app/core/config.py
 from pydantic_settings import BaseSettings
 from typing import List
 

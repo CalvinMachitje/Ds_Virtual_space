@@ -33,14 +33,19 @@ def is_public_path(path: str) -> bool:
 
 
 async def proxy_request(service: str, path: str, request: Request):
-    """Core proxy logic"""
+    """Core proxy logic - correctly forwards /api/admin/* to admin-service"""
     if service not in SERVICES:
         raise HTTPException(status_code=404, detail="Service not found")
 
-    target_url = f"{SERVICES[service]}/api/{path}"
+    # Special handling for admin service - keep the /admin prefix
+    if service == "admin":
+        target_url = f"{SERVICES[service]}/api/admin/{path}"
+    else:
+        target_url = f"{SERVICES[service]}/api/{path}"
 
     headers = dict(request.headers)
     headers.pop("host", None)
+    headers.pop("content-length", None)  # Let httpx handle it
 
     body = await request.body()
 
@@ -58,7 +63,7 @@ async def proxy_request(service: str, path: str, request: Request):
                 resp.aiter_bytes(),
                 status_code=resp.status_code,
                 headers=dict(resp.headers),
-                media_type=resp.headers.get("content-type")
+                media_type=resp.headers.get("content-type"),
             )
         except httpx.RequestError as e:
             raise HTTPException(status_code=503, detail=f"Service {service} unavailable")

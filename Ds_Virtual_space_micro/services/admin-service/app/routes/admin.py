@@ -1,6 +1,6 @@
-# services/auth-service/app/routes/admin.py
+# Admin routes for managing users, tickets, verifications, gigs, bookings, and payments.
+# services/admin-service/app/routes/admin.py
 from fastapi import APIRouter, Request, HTTPException, status, Depends
-from httpcore import request
 from pydantic import BaseModel, EmailStr
 from typing import Dict, Any, Optional, List
 import json
@@ -67,7 +67,12 @@ def parse_pagination(request: Request):
     return {"page": page, "per_page": per_page}
 
 
-def build_query_with_filters(table: str, filters: Dict[str, Any], order_by: str = "created_at"):
+def build_query_with_filters(
+    request: Request, 
+    table: str, 
+    filters: Dict[str, Any], 
+    order_by: str = "created_at"
+):
     query = supabase.table(table).select("*")
     for key, value in filters.items():
         if value is not None:
@@ -78,8 +83,12 @@ def build_query_with_filters(table: str, filters: Dict[str, Any], order_by: str 
             else:
                 query = query.eq(key, value)
 
-    page = int(request.query_params.get("page", 1))
-    per_page = int(request.query_params.get("per_page", 20))
+    try:
+        page = int(request.query_params.get("page", 1))
+        per_page = int(request.query_params.get("per_page", 20))
+    except (TypeError, ValueError):
+        page, per_page = 1, 20
+
     from_idx = (page - 1) * per_page
     to_idx = from_idx + per_page - 1
 
@@ -100,7 +109,6 @@ def build_query_with_filters(table: str, filters: Dict[str, Any], order_by: str 
         "total_pages": (total + per_page - 1) // per_page if per_page else 1,
         "has_more": (page * per_page) < total
     }
-
 
 def handle_supabase_response(response):
     if not response:
@@ -134,7 +142,9 @@ async def list_tickets(request: Request, current_user: str = Depends(get_current
             "user_id": request.query_params.get("user_id"),
             "priority": request.query_params.get("priority")
         }
-        query, page_info = build_query_with_filters("support_tickets", filters, order_by="created_at")
+        query, page_info = build_query_with_filters(
+            request, "support_tickets", filters, order_by="created_at"
+        )
         tickets = handle_supabase_response(query.execute()) or []
 
         return {"tickets": tickets, **page_info}
@@ -146,7 +156,11 @@ async def list_tickets(request: Request, current_user: str = Depends(get_current
 
 @router.post("/tickets")
 @limiter.limit("20 per minute")
-async def create_ticket(data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def create_ticket(
+    request: Request,        
+    data: Dict[str, Any], 
+    current_user: str = Depends(get_current_user)
+):
     required = ["user_id", "subject", "description"]
     missing = [f for f in required if not data.get(f)]
     if missing:
@@ -175,13 +189,12 @@ async def create_ticket(data: Dict[str, Any], current_user: str = Depends(get_cu
         if not result:
             raise HTTPException(500, detail="Failed to create ticket")
 
-        log_admin_action(
-            action="create_ticket",
-            target_id=result[0]["id"],
-            details={"user_id": data["user_id"], "subject": data["subject"]}
-        )
+        log_action(current_user, "create_ticket", {
+            "user_id": data.get("user_id"), 
+            "subject": data.get("subject")
+        })
 
-        return result[0]
+        return result[0] if result else None
 
     except Exception as e:
         print(f"Ticket creation failed: {str(e)}")
@@ -189,7 +202,7 @@ async def create_ticket(data: Dict[str, Any], current_user: str = Depends(get_cu
 
 
 @router.get("/tickets/{ticket_id}")
-async def get_ticket(ticket_id: str, current_user: str = Depends(get_current_user)):
+async def get_ticket(request: Request, ticket_id: str, current_user: str = Depends(get_current_user)):
     try:
         resp = supabase.table("support_tickets").select("*").eq("id", ticket_id).maybe_single().execute()
         ticket = handle_supabase_response(resp)
@@ -203,7 +216,12 @@ async def get_ticket(ticket_id: str, current_user: str = Depends(get_current_use
 
 @router.patch("/tickets/{ticket_id}")
 @limiter.limit("30 per minute")
-async def update_ticket(ticket_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_ticket(
+    request: Request,   
+    ticket_id: str, 
+    data: Dict[str, Any], 
+    current_user: str = Depends(get_current_user)
+):
     if not data:
         raise HTTPException(400, detail="No update data provided")
 
@@ -221,7 +239,7 @@ async def update_ticket(ticket_id: str, data: Dict[str, Any], current_user: str 
         status_history = current.get("status_history", []) or []
 
         # Status change with history
-        if "status" in data and data["status"] != current["status"]:
+        if "status" in data and data.get("status") != current.get("status"):
             reason = data.get("reason", "").strip()
             if not reason:
                 raise HTTPException(400, detail="Reason required when changing status")
@@ -252,11 +270,9 @@ async def update_ticket(ticket_id: str, data: Dict[str, Any], current_user: str 
             if not updated:
                 raise HTTPException(400, detail="Update failed")
 
-            log_admin_action(
-                action="update_ticket",
-                target_id=ticket_id,
-                details={"changed_fields": list(update_data.keys())}
-            )
+            log_action(current_user, "update_ticket", {
+                "changed_fields": list(update_data.keys())
+            })
 
             return updated[0] if updated else None
 
@@ -269,7 +285,7 @@ async def update_ticket(ticket_id: str, data: Dict[str, Any], current_user: str 
 
 @router.delete("/tickets/{ticket_id}")
 @limiter.limit("5 per minute")
-async def delete_ticket(ticket_id: str, current_user: str = Depends(get_current_user)):
+async def delete_ticket(request: Request, ticket_id: str, current_user: str = Depends(get_current_user)):
     try:
         resp = supabase.table("support_tickets").delete().eq("id", ticket_id).execute()
         deleted = handle_supabase_response(resp)
@@ -347,7 +363,7 @@ async def list_users(request: Request, current_user: str = Depends(get_current_u
 # =============================================================================
 @router.patch("/users/{user_id}")
 @limiter.limit("15 per minute")
-async def update_user(user_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_user(request: Request, user_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     action = data.get("action")
     if action not in ["ban", "unban", "verify", "unverify"]:
         raise HTTPException(400, detail="Invalid action")
@@ -387,7 +403,7 @@ async def update_user(user_id: str, data: Dict[str, Any], current_user: str = De
 # =============================================================================
 @router.patch("/users/bulk")
 @limiter.limit("10 per minute")
-async def bulk_user_update(data: BulkUserActionRequest, current_user: str = Depends(get_current_user)):
+async def bulk_user_update(request: Request, data: BulkUserActionRequest, current_user: str = Depends(get_current_user)):
     action = data.action
     user_ids = data.userIds
 
@@ -429,7 +445,7 @@ async def bulk_user_update(data: BulkUserActionRequest, current_user: str = Depe
 # =============================================================================
 @router.delete("/users/{user_id}")
 @limiter.limit("5 per minute")
-async def delete_user(user_id: str, current_user: str = Depends(get_current_user)):
+async def delete_user(request: Request, user_id: str, current_user: str = Depends(get_current_user)):
     if current_user == user_id:
         raise HTTPException(403, detail="Cannot delete your own account")
 
@@ -457,7 +473,7 @@ async def delete_user(user_id: str, current_user: str = Depends(get_current_user
 # =============================================================================
 @router.get("/verifications/pending")
 @limiter.limit("30 per minute")
-async def list_pending_verifications(current_user: str = Depends(get_current_user)):
+async def list_pending_verifications(request: Request, current_user: str = Depends(get_current_user)):
     try:
         res = supabase.table("verifications")\
             .select("""
@@ -488,7 +504,7 @@ async def list_pending_verifications(current_user: str = Depends(get_current_use
 # =============================================================================
 @router.get("/verifications/{verification_id}")
 @limiter.limit("20 per minute")
-async def get_verification(verification_id: str, current_user: str = Depends(get_current_user)):
+async def get_verification( request: Request, verification_id: str, current_user: str = Depends(get_current_user)):
     try:
         res = supabase.table("verifications")\
             .select("""
@@ -514,7 +530,7 @@ async def get_verification(verification_id: str, current_user: str = Depends(get
 # =============================================================================
 @router.patch("/verifications/{verification_id}/approve")
 @limiter.limit("10 per minute")
-async def approve_verification(verification_id: str, current_user: str = Depends(get_current_user)):
+async def approve_verification( request: Request, verification_id: str, current_user: str = Depends(get_current_user)):
     try:
         ver = supabase.table("verifications")\
             .select("seller_id")\
@@ -562,7 +578,7 @@ async def approve_verification(verification_id: str, current_user: str = Depends
 # =============================================================================
 @router.patch("/verifications/{verification_id}/reject")
 @limiter.limit("10 per minute")
-async def reject_verification(verification_id: str, data: VerificationActionRequest, current_user: str = Depends(get_current_user)):
+async def reject_verification(request: Request, verification_id: str, data: VerificationActionRequest, current_user: str = Depends(get_current_user)):
     try:
         supabase.table("verifications").update({
             "status": "rejected",
@@ -614,7 +630,7 @@ async def list_gigs(request: Request, current_user: str = Depends(get_current_us
 
 @router.patch("/gigs/{gig_id}/status")
 @limiter.limit("20 per minute")
-async def update_gig_status(gig_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_gig_status(request: Request, gig_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):    
     new_status = data.get("status")
 
     if new_status not in ["active", "rejected"]:
@@ -655,9 +671,7 @@ async def list_bookings(request: Request, current_user: str = Depends(get_curren
         }
 
         query, page_info = build_query_with_filters(
-            table="bookings",
-            filters=filters,
-            order_by="created_at"
+            request, "bookings", filters, order_by="created_at"
         )
 
         bookings = handle_supabase_response(query.execute()) or []
@@ -679,7 +693,7 @@ async def list_bookings(request: Request, current_user: str = Depends(get_curren
 
 @router.patch("/bookings/{booking_id}")
 @limiter.limit("15 per minute")
-async def update_booking(booking_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_booking(request: Request, booking_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     allowed = ["status", "price", "service", "cancel_reason", "requirements", "notes"]
     update_data = {k: v for k, v in data.items() if k in allowed and v is not None}
 
@@ -713,7 +727,7 @@ async def update_booking(booking_id: str, data: Dict[str, Any], current_user: st
 
 
 @router.patch("/bookings/{booking_id}/status")
-async def update_booking_status(booking_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_booking_status(request: Request, booking_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     new_status = data.get("status")
 
     if not new_status or new_status not in ["pending", "active", "completed", "cancelled"]:
@@ -751,7 +765,9 @@ async def update_booking_status(booking_id: str, data: Dict[str, Any], current_u
 async def list_payments(request: Request, current_user: str = Depends(get_current_user)):
     try:
         filters = {"status": request.query_params.get("status")}
-        query, page_info = build_query_with_filters("payments", filters, order_by="created_at")
+        query, page_info = build_query_with_filters(
+            request, "payments", filters, order_by="created_at"
+        )
         payments = handle_supabase_response(query.execute()) or []
 
         return {"payments": payments, **page_info}
@@ -763,7 +779,7 @@ async def list_payments(request: Request, current_user: str = Depends(get_curren
 
 @router.patch("/payments/{payment_id}/refund")
 @limiter.limit("5 per minute")
-async def refund_payment(payment_id: str, current_user: str = Depends(get_current_user)):
+async def refund_payment(request: Request, payment_id: str, current_user: str = Depends(get_current_user)):
     try:
         resp = supabase.table("payments")\
             .update({"status": "refunded", "updated_at": "now()"})\
@@ -791,7 +807,7 @@ async def refund_payment(payment_id: str, current_user: str = Depends(get_curren
 # ANALYTICS / DASHBOARD
 # =============================================================================
 @router.get("/dashboard")
-async def admin_dashboard(current_user: str = Depends(get_current_user)):
+async def admin_dashboard(request: Request, current_user: str = Depends(get_current_user)):
     try:
         total_users = supabase.table("profiles").select("count", count="exact").execute().count or 0
         pending_verifs = supabase.table("verifications").select("count", count="exact").eq("status", "pending").execute().count or 0
@@ -955,7 +971,7 @@ async def assign_seller_to_job_request(request_id: str, data: JobOfferRequest, c
 
 
 @router.patch("/job-requests/{request_id}/status")
-async def update_job_request_status(request_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_job_request_status( request: Request, request_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     new_status = data.get("status")
     reason = data.get("reason", "").strip()
 
@@ -993,7 +1009,7 @@ async def update_job_request_status(request_id: str, data: Dict[str, Any], curre
 
 
 @router.post("/job-requests/{request_id}/offers")
-async def send_offer_to_sellers(request_id: str, data: JobOfferRequest, current_user: str = Depends(get_current_user)):
+async def send_offer_to_sellers(request: Request, request_id: str, data: JobOfferRequest, current_user: str = Depends(get_current_user)):
     seller_ids = data.seller_ids
     price = data.offered_price
     start_time = data.offered_start
@@ -1127,7 +1143,7 @@ async def get_available_sellers(request: Request, current_user: str = Depends(ge
 # DEBUG
 # =============================================================================
 @router.get("/debug/supabase")
-async def debug_supabase(current_user: str = Depends(get_current_user)):
+async def debug_supabase(request: Request, current_user: str = Depends(get_current_user)):
     status = supabase.check_connection()
     return status
 
@@ -1137,7 +1153,7 @@ async def debug_supabase(current_user: str = Depends(get_current_user)):
 # =============================================================================
 @router.get("/analytics")
 @limiter.limit("20 per minute")
-async def get_analytics(current_user: str = Depends(get_current_user)):
+async def get_analytics(request: Request, current_user: str = Depends(get_current_user)):
     try:
         # Reuse your existing get_analytics_summary from supabase_service
         summary = supabase.get_analytics_summary()
@@ -1177,7 +1193,7 @@ async def get_analytics(current_user: str = Depends(get_current_user)):
 # =============================================================================
 @router.get("/settings")
 @limiter.limit("30 per minute")
-async def get_settings(current_user: str = Depends(get_current_user)):
+async def get_settings(request: Request, current_user: str = Depends(get_current_user)):
     try:
         res = supabase.table("system_settings")\
             .select("*")\
@@ -1235,7 +1251,7 @@ async def get_settings(current_user: str = Depends(get_current_user)):
 
 @router.patch("/settings")
 @limiter.limit("10 per minute")
-async def update_settings(data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_settings(request: Request, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     if not data:
         raise HTTPException(400, detail="No data provided")
 
@@ -1331,7 +1347,7 @@ async def update_settings(data: Dict[str, Any], current_user: str = Depends(get_
 # CATEGORIES
 # =============================================================================
 @router.get("/categories")
-async def list_categories(current_user: str = Depends(get_current_user)):
+async def list_categories(request: Request, current_user: str = Depends(get_current_user)):
     try:
         res = supabase.table("system_settings")\
             .select("categories")\
@@ -1346,7 +1362,7 @@ async def list_categories(current_user: str = Depends(get_current_user)):
 
 
 @router.post("/categories")
-async def create_category(data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def create_category(request: Request, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     name = data.get("name")
     description = data.get("description", "")
 
@@ -1379,7 +1395,7 @@ async def create_category(data: Dict[str, Any], current_user: str = Depends(get_
 
 
 @router.patch("/categories/{category_id}")
-async def update_category(category_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_category(request: Request, category_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     name = data.get("name")
     active = data.get("active")
 
@@ -1415,7 +1431,7 @@ async def update_category(category_id: str, data: Dict[str, Any], current_user: 
 
 
 @router.delete("/categories/{category_id}")
-async def delete_category(category_id: str, current_user: str = Depends(get_current_user)):
+async def delete_category(request: Request, category_id: str, current_user: str = Depends(get_current_user)):
     try:
         res = supabase.table("system_settings").select("categories").limit(1).execute()
         if not res.data:
@@ -1512,7 +1528,7 @@ async def list_support_tickets(request: Request, current_user: str = Depends(get
 
 @router.get("/support/{ticket_id}/thread")
 @limiter.limit("20 per minute")
-async def get_ticket_thread(ticket_id: str, current_user: str = Depends(get_current_user)):
+async def get_ticket_thread(request: Request, ticket_id: str, current_user: str = Depends(get_current_user)):
     try:
         ticket_res = supabase.table("support_tickets")\
             .select("""
@@ -1577,7 +1593,7 @@ async def get_ticket_thread(ticket_id: str, current_user: str = Depends(get_curr
 
 @router.post("/support/{ticket_id}/reply")
 @limiter.limit("10 per minute")
-async def add_support_reply(ticket_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def add_support_reply(request: Request, ticket_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     message = data.get("message", "").strip()
     if not message:
         raise HTTPException(400, detail="Message required")
@@ -1627,7 +1643,7 @@ async def add_support_reply(ticket_id: str, data: Dict[str, Any], current_user: 
 
 @router.patch("/support/{ticket_id}/resolve")
 @limiter.limit("10 per minute")
-async def resolve_ticket(ticket_id: str, current_user: str = Depends(get_current_user)):
+async def resolve_ticket(request: Request, ticket_id: str, current_user: str = Depends(get_current_user)):
     try:
         res = supabase.table("support_tickets")\
             .update({
@@ -1657,7 +1673,7 @@ async def resolve_ticket(ticket_id: str, current_user: str = Depends(get_current
 
 @router.patch("/support/{ticket_id}/escalate")
 @limiter.limit("5 per minute")
-async def escalate_ticket(ticket_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def escalate_ticket(request: Request, ticket_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     note = data.get("escalated_note", "").strip()
     if not note:
         raise HTTPException(400, detail="Escalation note required")
@@ -1694,7 +1710,7 @@ async def escalate_ticket(ticket_id: str, data: Dict[str, Any], current_user: st
 # ADMIN PROFILE
 # =============================================================================
 @router.get("/profile/{admin_id}")
-async def get_admin_profile(admin_id: str, current_user: str = Depends(get_current_user)):
+async def get_admin_profile(request: Request, admin_id: str, current_user: str = Depends(get_current_user)):
     if current_user != admin_id:
         raise HTTPException(403, detail="Unauthorized")
 
@@ -1715,7 +1731,7 @@ async def get_admin_profile(admin_id: str, current_user: str = Depends(get_curre
 
 
 @router.patch("/profile/{admin_id}")
-async def update_admin_profile(admin_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
+async def update_admin_profile(request: Request, admin_id: str, data: Dict[str, Any], current_user: str = Depends(get_current_user)):
     if current_user != admin_id:
         raise HTTPException(403, detail="Unauthorized")
 
@@ -1791,7 +1807,7 @@ async def list_audit_logs(request: Request, current_user: str = Depends(get_curr
 
 
 @router.post("/log")
-async def create_log(data: Dict[str, Any]):
+async def create_log(request: Request, data: Dict[str, Any]):
     log = {
         "id": str(uuid.uuid4()),
         "user_id": data.get("user_id", "unknown"),
